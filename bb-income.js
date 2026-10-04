@@ -1,27 +1,7 @@
 /** @param {NS} ns */
 export async function main(ns) {
+
     ns.disableLog("ALL");
-
-    // ============================================================
-    // BITBURNER INCOME ANALYZER
-    // ============================================================
-    //
-    // Shows:
-    //
-    //   - Current total script income / second
-    //   - Current total script EXP / second
-    //   - 1 minute income trend
-    //   - 5 minute income trend
-    //   - Recent realized income by target
-    //   - Recent realized income by script
-    //   - Current running script lifetime performance
-    //   - RAM utilization
-    //   - Dispatcher vs legacy hacking activity
-    //
-    // Recent realized performance uses getRecentScripts().
-    //
-    // ============================================================
-
 
     // ============================================================
     // CONFIGURATION
@@ -31,12 +11,11 @@ export async function main(ns) {
         refreshMs: 2000,
 
         windowWidth: 1450,
-        windowHeight: 800,
+        windowHeight: 850,
 
         separatorWidth: 138,
 
         recentWindowSeconds: 60,
-
         oneMinuteSeconds: 60,
         fiveMinuteSeconds: 300,
 
@@ -44,8 +23,9 @@ export async function main(ns) {
         maxScriptRows: 10,
         maxHostRows: 10,
 
-        // Ignore recent scripts older than this.
-        recentScriptMaxAgeSeconds: 300
+        // Matches bb-dispatcher.js default unless overridden
+        // with --reserve.
+        dispatcherDefaultHomeReserve: 8
     };
 
 
@@ -68,27 +48,24 @@ export async function main(ns) {
 
 
     // ============================================================
-    // KNOWN WORKERS
+    // SCRIPT NAMES
     // ============================================================
 
-    const DISPATCHER_WORKERS = new Set([
-        "bb-hack-worker.js",
-        "bb-grow-worker.js",
-        "bb-weaken-worker.js"
-    ]);
+    const DISPATCHER_SCRIPT =
+        "bb-dispatcher.js";
 
+    const DISPATCHER_WORKERS =
+        new Set([
+            "bb-hack-worker.js",
+            "bb-grow-worker.js",
+            "bb-weaken-worker.js"
+        ]);
 
-    // ============================================================
-    // LEGACY SCRIPTS
-    //
-    // These may attack the host they run on when no server
-    // argument exists.
-    // ============================================================
-
-    const LOCAL_TARGET_SCRIPTS = new Set([
-        "early-hack-template.js",
-        "local-hack-template.js"
-    ]);
+    const LOCAL_TARGET_SCRIPTS =
+        new Set([
+            "early-hack-template.js",
+            "local-hack-template.js"
+        ]);
 
 
     // ============================================================
@@ -111,7 +88,16 @@ export async function main(ns) {
     // STATE
     // ============================================================
 
-    const incomeSamples = [];
+    const realizedSamples = [];
+
+    const seenRecentScripts =
+        new Set();
+
+    const monitorStart =
+        Date.now();
+
+    let monitorCapturedMoney = 0;
+    let monitorCapturedExp = 0;
 
     let lastDisplay = "";
 
@@ -125,6 +111,15 @@ export async function main(ns) {
         const now =
             Date.now();
 
+        const monitorSeconds =
+            Math.max(
+                0,
+                (
+                    now -
+                    monitorStart
+                ) / 1000
+            );
+
 
         // ========================================================
         // NETWORK
@@ -133,161 +128,95 @@ export async function main(ns) {
         const servers =
             scanNetwork(ns);
 
-
         const serverSet =
             new Set(servers);
 
 
         // ========================================================
-        // GLOBAL PERFORMANCE
+        // GLOBAL BITBURNER SCRIPT PERFORMANCE
         // ========================================================
 
         const totalIncome =
             ns.getTotalScriptIncome();
 
-
-        const currentIncomePerSecond =
+        const activeIncomePerSecond =
             totalIncome[0];
 
-
-        const incomeSinceAugment =
+        const sinceAugmentIncomePerSecond =
             totalIncome[1];
 
-
-        const currentExpPerSecond =
+        const activeExpPerSecond =
             ns.getTotalScriptExpGain();
 
 
         // ========================================================
-        // ADD TREND SAMPLE
+        // DISPATCHER CONFIGURATION
         // ========================================================
 
-        incomeSamples.push({
-            time: now,
-            value: currentIncomePerSecond
-        });
-
-
-        // Keep only slightly more than five minutes.
-
-        while (
-            incomeSamples.length > 0 &&
-            now -
-                incomeSamples[0].time >
-                (
-                    CONFIG.fiveMinuteSeconds +
-                    10
-                ) * 1000
-        ) {
-
-            incomeSamples.shift();
-        }
-
-
-        // ========================================================
-        // TREND CALCULATIONS
-        // ========================================================
-
-        const avg1m =
-            averageSamples(
-                incomeSamples,
-                now,
-                CONFIG.oneMinuteSeconds
+        const dispatcherInfo =
+            getDispatcherInfo(
+                ns,
+                DISPATCHER_SCRIPT,
+                CONFIG.dispatcherDefaultHomeReserve
             );
 
-
-        const avg5m =
-            averageSamples(
-                incomeSamples,
-                now,
-                CONFIG.fiveMinuteSeconds
-            );
-
-
-        const oldestSample =
-            incomeSamples.length > 0
-                ? incomeSamples[0]
-                : null;
-
-
-        const monitoringSeconds =
-            oldestSample
-                ? (
-                    now -
-                    oldestSample.time
-                ) / 1000
-                : 0;
-
-
-        const trendPercent =
-            avg5m > 0
-                ? (
-                    (
-                        currentIncomePerSecond -
-                        avg5m
-                    ) /
-                    avg5m
-                ) * 100
-                : 0;
+        const homeReserve =
+            dispatcherInfo.homeReserve;
 
 
         // ========================================================
-        // CURRENT RUNNING SCRIPTS
+        // CURRENT RUNNING SCRIPTS + RAM
         // ========================================================
 
         const currentScripts = [];
 
-
         let runningProcesses = 0;
-
         let runningThreads = 0;
 
         let totalMaxRam = 0;
-
         let totalUsedRam = 0;
 
+        let homeMaxRam = 0;
+        let homeUsedRam = 0;
 
-        for (
-            const host
-            of servers
-        ) {
 
-            if (
-                !ns.hasRootAccess(host)
-            ) {
+        for (const host of servers) {
 
+            if (!ns.hasRootAccess(host)) {
                 continue;
             }
-
 
             const maxRam =
                 ns.getServerMaxRam(host);
 
-
             const usedRam =
                 ns.getServerUsedRam(host);
 
-
             totalMaxRam +=
                 maxRam;
-
 
             totalUsedRam +=
                 usedRam;
 
 
+            if (host === "home") {
+
+                homeMaxRam =
+                    maxRam;
+
+                homeUsedRam =
+                    usedRam;
+            }
+
+
             const processes =
                 ns.ps(host);
-
 
             runningProcesses +=
                 processes.length;
 
 
-            for (
-                const process
-                of processes
-            ) {
+            for (const process of processes) {
 
                 runningThreads +=
                     process.threads;
@@ -297,7 +226,6 @@ export async function main(ns) {
                     ns.getRunningScript(
                         process.pid
                     );
-
 
                 if (!info) {
                     continue;
@@ -315,19 +243,15 @@ export async function main(ns) {
 
                 const lifetimeMoneyPerSecond =
                     info.onlineRunningTime > 0
-                        ? (
-                            info.onlineMoneyMade /
-                            info.onlineRunningTime
-                        )
+                        ? info.onlineMoneyMade /
+                          info.onlineRunningTime
                         : 0;
 
 
                 const lifetimeExpPerSecond =
                     info.onlineRunningTime > 0
-                        ? (
-                            info.onlineExpGained /
-                            info.onlineRunningTime
-                        )
+                        ? info.onlineExpGained /
+                          info.onlineRunningTime
                         : 0;
 
 
@@ -365,19 +289,98 @@ export async function main(ns) {
         }
 
 
-        const freeRam =
+        // ========================================================
+        // PHYSICAL RAM
+        // ========================================================
+
+        const physicalFreeRam =
             Math.max(
                 0,
                 totalMaxRam -
                 totalUsedRam
             );
 
-
-        const ramUtilization =
+        const physicalUtilization =
             totalMaxRam > 0
                 ? (
                     totalUsedRam /
                     totalMaxRam
+                ) * 100
+                : 0;
+
+
+        // ========================================================
+        // DISPATCHER-USABLE RAM
+        // ========================================================
+        //
+        // bb-dispatcher subtracts its configured reserve from
+        // HOME free RAM. Other rooted servers have no reserve.
+        //
+        // ========================================================
+
+        const effectiveReserve =
+            Math.min(
+                homeReserve,
+                homeMaxRam
+            );
+
+
+        const dispatcherCapacity =
+            Math.max(
+                0,
+                totalMaxRam -
+                effectiveReserve
+            );
+
+
+        const homeDispatcherFree =
+            Math.max(
+                0,
+                homeMaxRam -
+                homeUsedRam -
+                effectiveReserve
+            );
+
+
+        let nonHomeFreeRam = 0;
+
+
+        for (const host of servers) {
+
+            if (
+                host === "home" ||
+                !ns.hasRootAccess(host)
+            ) {
+                continue;
+            }
+
+            nonHomeFreeRam +=
+                Math.max(
+                    0,
+                    ns.getServerMaxRam(host) -
+                    ns.getServerUsedRam(host)
+                );
+        }
+
+
+        const dispatcherFreeRam =
+            homeDispatcherFree +
+            nonHomeFreeRam;
+
+
+        const dispatcherUsedCapacity =
+            Math.max(
+                0,
+                dispatcherCapacity -
+                dispatcherFreeRam
+            );
+
+
+        const dispatcherUtilization =
+            dispatcherCapacity > 0
+                ? (
+                    dispatcherUsedCapacity /
+                    dispatcherCapacity
                 ) * 100
                 : 0;
 
@@ -389,7 +392,6 @@ export async function main(ns) {
         const recentScripts =
             ns.getRecentScripts();
 
-
         const recentCutoff =
             now -
             (
@@ -398,21 +400,13 @@ export async function main(ns) {
             );
 
 
-        const maxRecentCutoff =
-            now -
-            (
-                CONFIG.recentScriptMaxAgeSeconds *
-                1000
-            );
-
-
         const recentCompleted = [];
 
+        let oldestRecentDeath =
+            null;
 
-        for (
-            const script
-            of recentScripts
-        ) {
+
+        for (const script of recentScripts) {
 
             const deathTime =
                 getTimeMilliseconds(
@@ -421,8 +415,51 @@ export async function main(ns) {
 
 
             if (
+                oldestRecentDeath === null ||
+                deathTime < oldestRecentDeath
+            ) {
+
+                oldestRecentDeath =
+                    deathTime;
+            }
+
+
+            // ====================================================
+            // CAPTURE UNIQUE COMPLETIONS SINCE MONITOR START
+            // ====================================================
+
+            const recentKey =
+                makeRecentScriptKey(
+                    script,
+                    deathTime
+                );
+
+
+            if (
+                deathTime >= monitorStart &&
+                !seenRecentScripts.has(
+                    recentKey
+                )
+            ) {
+
+                seenRecentScripts.add(
+                    recentKey
+                );
+
+                monitorCapturedMoney +=
+                    script.onlineMoneyMade ?? 0;
+
+                monitorCapturedExp +=
+                    script.onlineExpGained ?? 0;
+            }
+
+
+            // Only need recent-window scripts for the following
+            // realized-rate calculations.
+
+            if (
                 deathTime <
-                maxRecentCutoff
+                recentCutoff
             ) {
 
                 continue;
@@ -452,62 +489,75 @@ export async function main(ns) {
                     script.threads,
 
                 onlineMoneyMade:
-                    script.onlineMoneyMade,
+                    script.onlineMoneyMade ?? 0,
 
                 onlineExpGained:
-                    script.onlineExpGained,
+                    script.onlineExpGained ?? 0,
 
                 onlineRunningTime:
-                    script.onlineRunningTime,
+                    script.onlineRunningTime ?? 0,
 
-                deathTime,
-
-                inRecentWindow:
-                    deathTime >=
-                    recentCutoff
+                deathTime
             });
         }
 
 
         // ========================================================
-        // AGGREGATE RECENT REALIZED INCOME
+        // RECENT SCRIPT HISTORY COVERAGE
+        // ========================================================
+
+        const recentHistoryCoverageSeconds =
+            oldestRecentDeath !== null
+                ? Math.max(
+                    0,
+                    (
+                        now -
+                        oldestRecentDeath
+                    ) / 1000
+                )
+                : 0;
+
+
+        // Once this monitor has itself been running longer than
+        // the requested window, a recent-script history shorter
+        // than that window means the 60-second realized estimate
+        // may not include the full period.
+        //
+        // This does NOT prove truncation, but it is a useful warning.
+
+        const recentHistoryMayBeIncomplete =
+            monitorSeconds >=
+                CONFIG.recentWindowSeconds &&
+            recentScripts.length > 0 &&
+            recentHistoryCoverageSeconds <
+                CONFIG.recentWindowSeconds *
+                0.90;
+
+
+        // ========================================================
+        // AGGREGATE REALIZED PERFORMANCE
         // ========================================================
 
         const targetStats =
             new Map();
 
-
         const scriptStats =
             new Map();
-
 
         const hostStats =
             new Map();
 
 
         let capturedRecentMoney = 0;
-
         let capturedRecentExp = 0;
 
         let recentHackCompletions = 0;
 
 
-        for (
-            const script
-            of recentCompleted
-        ) {
-
-            if (
-                !script.inRecentWindow
-            ) {
-
-                continue;
-            }
-
+        for (const script of recentCompleted) {
 
             capturedRecentMoney +=
                 script.onlineMoneyMade;
-
 
             capturedRecentExp +=
                 script.onlineExpGained;
@@ -521,10 +571,6 @@ export async function main(ns) {
             }
 
 
-            // ----------------------------------------------------
-            // BY SCRIPT
-            // ----------------------------------------------------
-
             addAggregate(
                 scriptStats,
                 script.filename,
@@ -532,20 +578,12 @@ export async function main(ns) {
             );
 
 
-            // ----------------------------------------------------
-            // BY HOST
-            // ----------------------------------------------------
-
             addAggregate(
                 hostStats,
                 script.host,
                 script
             );
 
-
-            // ----------------------------------------------------
-            // BY TARGET
-            // ----------------------------------------------------
 
             if (script.target) {
 
@@ -558,8 +596,76 @@ export async function main(ns) {
         }
 
 
+        const realizedIncomePerSecond =
+            capturedRecentMoney /
+            CONFIG.recentWindowSeconds;
+
+
+        const realizedExpPerSecond =
+            capturedRecentExp /
+            CONFIG.recentWindowSeconds;
+
+
         // ========================================================
-        // TURN AGGREGATES INTO ARRAYS
+        // REALIZED RATE TREND
+        // ========================================================
+
+        realizedSamples.push({
+
+            time:
+                now,
+
+            value:
+                realizedIncomePerSecond
+        });
+
+
+        while (
+            realizedSamples.length > 0 &&
+            now -
+                realizedSamples[0].time >
+                (
+                    CONFIG.fiveMinuteSeconds +
+                    10
+                ) *
+                1000
+        ) {
+
+            realizedSamples.shift();
+        }
+
+
+        const avg1m =
+            averageSamples(
+                realizedSamples,
+                now,
+                CONFIG.oneMinuteSeconds
+            );
+
+
+        const avg5m =
+            averageSamples(
+                realizedSamples,
+                now,
+                CONFIG.fiveMinuteSeconds
+            );
+
+
+        const trendPercent =
+            avg5m > 0
+                ? (
+                    (
+                        realizedIncomePerSecond -
+                        avg5m
+                    ) /
+                    avg5m
+                ) *
+                100
+                : 0;
+
+
+        // ========================================================
+        // AGGREGATE TABLES
         // ========================================================
 
         const targetRows =
@@ -584,17 +690,14 @@ export async function main(ns) {
 
 
         // ========================================================
-        // CURRENT LONG-RUNNING PERFORMANCE BY SCRIPT
+        // CURRENT SCRIPT PERFORMANCE
         // ========================================================
 
         const runningScriptMap =
             new Map();
 
 
-        for (
-            const script
-            of currentScripts
-        ) {
+        for (const script of currentScripts) {
 
             if (
                 !runningScriptMap.has(
@@ -608,15 +711,20 @@ export async function main(ns) {
                         name:
                             script.filename,
 
-                        processes: 0,
+                        processes:
+                            0,
 
-                        threads: 0,
+                        threads:
+                            0,
 
-                        ram: 0,
+                        ram:
+                            0,
 
-                        moneyPerSecond: 0,
+                        moneyPerSecond:
+                            0,
 
-                        expPerSecond: 0
+                        expPerSecond:
+                            0
                     }
                 );
             }
@@ -654,7 +762,7 @@ export async function main(ns) {
 
 
         // ========================================================
-        // DISPATCHER INFORMATION
+        // DISPATCHER WORKERS
         // ========================================================
 
         const dispatcherRunning =
@@ -675,6 +783,15 @@ export async function main(ns) {
             );
 
 
+        const dispatcherRam =
+            dispatcherRunning.reduce(
+                (sum, script) =>
+                    sum +
+                    script.ram,
+                0
+            );
+
+
         const dispatcherTargets =
             new Set(
                 dispatcherRunning
@@ -686,31 +803,28 @@ export async function main(ns) {
             );
 
 
-        // ========================================================
-        // RECENT REALIZED RATE
-        // ========================================================
-        //
-        // This is:
-        //
-        // money captured from scripts that completed in the
-        // most recent configured window
-        //
-        //              divided by
-        //
-        // window length.
-        //
-        // This is particularly useful for short dispatcher workers.
-        //
-        // ========================================================
-
-        const capturedIncomePerSecond =
-            capturedRecentMoney /
-            CONFIG.recentWindowSeconds;
+        const hackWorkers =
+            dispatcherRunning.filter(
+                script =>
+                    script.filename ===
+                    "bb-hack-worker.js"
+            );
 
 
-        const capturedExpPerSecond =
-            capturedRecentExp /
-            CONFIG.recentWindowSeconds;
+        const growWorkers =
+            dispatcherRunning.filter(
+                script =>
+                    script.filename ===
+                    "bb-grow-worker.js"
+            );
+
+
+        const weakenWorkers =
+            dispatcherRunning.filter(
+                script =>
+                    script.filename ===
+                    "bb-weaken-worker.js"
+            );
 
 
         // ========================================================
@@ -719,10 +833,6 @@ export async function main(ns) {
 
         const lines = [];
 
-
-        // ========================================================
-        // HEADER
-        // ========================================================
 
         lines.push(
             color(
@@ -737,11 +847,11 @@ export async function main(ns) {
         lines.push(
             color(
                 centerText(
-                    "BITBURNER // INCOME ANALYZER",
+                    "BITBURNER // DISPATCHER INCOME ANALYZER",
                     CONFIG.separatorWidth
                 ),
                 COLOR.bold +
-                    COLOR.brightWhite
+                COLOR.brightWhite
             )
         );
 
@@ -757,12 +867,12 @@ export async function main(ns) {
 
 
         // ========================================================
-        // CURRENT PERFORMANCE
+        // REALIZED PERFORMANCE
         // ========================================================
 
         section(
             lines,
-            "CURRENT PERFORMANCE",
+            "REALIZED PERFORMANCE",
             CONFIG,
             COLOR
         );
@@ -771,95 +881,12 @@ export async function main(ns) {
         lines.push(
 
             field(
-                "Income / sec",
+                "Realized / sec",
                 formatMoney(
                     ns,
-                    currentIncomePerSecond
+                    realizedIncomePerSecond
                 ),
-                30
-            ) +
-
-            field(
-                "EXP / sec",
-                ns.format.number(
-                    currentExpPerSecond,
-                    2
-                ),
-                28
-            ) +
-
-            field(
-                "Processes",
-                runningProcesses,
-                24
-            ) +
-
-            field(
-                "Threads",
-                runningThreads,
-                24
-            )
-        );
-
-
-        lines.push(
-
-            field(
-                "Since Augment",
-                formatMoney(
-                    ns,
-                    incomeSinceAugment
-                ) + "/sec",
-                30
-            ) +
-
-            field(
-                "Recent Captured",
-                formatMoney(
-                    ns,
-                    capturedIncomePerSecond
-                ) + "/sec",
-                28
-            ) +
-
-            field(
-                "Recent EXP",
-                ns.format.number(
-                    capturedExpPerSecond,
-                    2
-                ) + "/sec",
-                24
-            ) +
-
-            field(
-                "Hack Completions",
-                recentHackCompletions,
-                24
-            )
-        );
-
-
-        // ========================================================
-        // TREND
-        // ========================================================
-
-        section(
-            lines,
-            "INCOME TREND",
-            CONFIG,
-            COLOR
-        );
-
-
-        lines.push(
-
-            field(
-                "Current",
-                formatMoney(
-                    ns,
-                    currentIncomePerSecond
-                ) + "/sec",
-                30
+                32
             ) +
 
             field(
@@ -881,9 +908,46 @@ export async function main(ns) {
             ) +
 
             field(
+                "Hack Finishes",
+                recentHackCompletions,
+                24
+            )
+        );
+
+
+        lines.push(
+
+            field(
+                "60s Money",
+                formatMoney(
+                    ns,
+                    capturedRecentMoney
+                ),
+                32
+            ) +
+
+            field(
+                "60s EXP",
+                ns.format.number(
+                    capturedRecentExp,
+                    2
+                ),
+                30
+            ) +
+
+            field(
+                "Monitor Money",
+                formatMoney(
+                    ns,
+                    monitorCapturedMoney
+                ),
+                30
+            ) +
+
+            field(
                 "Monitoring",
                 formatDuration(
-                    monitoringSeconds
+                    monitorSeconds
                 ),
                 24
             )
@@ -911,7 +975,7 @@ export async function main(ns) {
                 `${trendSymbol} ` +
                 `${trendPercent >= 0 ? "+" : ""}` +
                 `${trendPercent.toFixed(1)}% ` +
-                "vs monitored 5-minute average",
+                "vs 5-minute realized average",
                 trendColor
             )
         );
@@ -919,20 +983,20 @@ export async function main(ns) {
 
         lines.push(
             createIncomeBar(
-                currentIncomePerSecond,
+                realizedIncomePerSecond,
                 avg5m,
-                70
+                75
             )
         );
 
 
         // ========================================================
-        // RAM
+        // API / ACTIVE RATE
         // ========================================================
 
         section(
             lines,
-            "RESOURCE UTILIZATION",
+            "BITBURNER SCRIPT RATE",
             CONFIG,
             COLOR
         );
@@ -941,41 +1005,44 @@ export async function main(ns) {
         lines.push(
 
             field(
-                "RAM Used",
-                ns.format.ram(
-                    totalUsedRam
-                ),
+                "Active Income",
+                formatMoney(
+                    ns,
+                    activeIncomePerSecond
+                ) + "/sec",
+                32
+            ) +
+
+            field(
+                "Since Augment",
+                formatMoney(
+                    ns,
+                    sinceAugmentIncomePerSecond
+                ) + "/sec",
+                32
+            ) +
+
+            field(
+                "Active EXP",
+                ns.format.number(
+                    activeExpPerSecond,
+                    2
+                ) + "/sec",
                 28
             ) +
 
             field(
-                "RAM Free",
-                ns.format.ram(
-                    freeRam
-                ),
-                28
-            ) +
-
-            field(
-                "RAM Total",
-                ns.format.ram(
-                    totalMaxRam
-                ),
-                28
-            ) +
-
-            field(
-                "Utilization",
-                `${ramUtilization.toFixed(1)}%`,
-                24
+                "Processes",
+                runningProcesses,
+                20
             )
         );
 
 
         lines.push(
-            createPercentBar(
-                ramUtilization,
-                85
+            color(
+                "Active income is Bitburner's running-script rate; realized 60s income is generally more useful for short HWGW workers.",
+                COLOR.gray
             )
         );
 
@@ -995,15 +1062,53 @@ export async function main(ns) {
         lines.push(
 
             field(
-                "Workers Running",
-                dispatcherRunning.length,
+                "Dispatcher",
+                dispatcherInfo.running
+                    ? "RUNNING"
+                    : "NOT RUNNING",
                 28
             ) +
 
             field(
-                "Worker Threads",
+                "Workers",
+                dispatcherRunning.length,
+                24
+            ) +
+
+            field(
+                "Threads",
                 dispatcherThreads,
+                24
+            ) +
+
+            field(
+                "Worker RAM",
+                ns.format.ram(
+                    dispatcherRam
+                ),
                 28
+            )
+        );
+
+
+        lines.push(
+
+            field(
+                "Hack Workers",
+                hackWorkers.length,
+                28
+            ) +
+
+            field(
+                "Grow Workers",
+                growWorkers.length,
+                24
+            ) +
+
+            field(
+                "Weaken Workers",
+                weakenWorkers.length,
+                24
             ) +
 
             field(
@@ -1031,11 +1136,99 @@ export async function main(ns) {
 
             lines.push(
                 color(
-                    "No active bb-dispatcher workers detected at this instant.",
+                    "No active dispatcher workers detected at this instant.",
                     COLOR.gray
                 )
             );
         }
+
+
+        // ========================================================
+        // RAM
+        // ========================================================
+
+        section(
+            lines,
+            "RESOURCE UTILIZATION",
+            CONFIG,
+            COLOR
+        );
+
+
+        lines.push(
+
+            field(
+                "Physical Used",
+                ns.format.ram(
+                    totalUsedRam
+                ),
+                28
+            ) +
+
+            field(
+                "Physical Free",
+                ns.format.ram(
+                    physicalFreeRam
+                ),
+                28
+            ) +
+
+            field(
+                "Physical Total",
+                ns.format.ram(
+                    totalMaxRam
+                ),
+                28
+            ) +
+
+            field(
+                "Physical Util",
+                `${physicalUtilization.toFixed(1)}%`,
+                26
+            )
+        );
+
+
+        lines.push(
+
+            field(
+                "Usable Capacity",
+                ns.format.ram(
+                    dispatcherCapacity
+                ),
+                28
+            ) +
+
+            field(
+                "Usable Free",
+                ns.format.ram(
+                    dispatcherFreeRam
+                ),
+                28
+            ) +
+
+            field(
+                "Home Reserve",
+                ns.format.ram(
+                    effectiveReserve
+                ),
+                28
+            ) +
+
+            field(
+                "Usable Util",
+                `${dispatcherUtilization.toFixed(1)}%`,
+                26
+            )
+        );
+
+
+        lines.push(
+            createPercentBar(
+                dispatcherUtilization,
+                85
+            )
+        );
 
 
         // ========================================================
@@ -1091,7 +1284,7 @@ export async function main(ns) {
 
             lines.push(
                 color(
-                    "No completed target-based jobs captured in the recent window.",
+                    "No completed target jobs captured during the recent window.",
                     COLOR.gray
                 )
             );
@@ -1129,16 +1322,19 @@ export async function main(ns) {
                     )
                         .padStart(14) +
 
-                    row.jobs
-                        .toString()
+                    String(
+                        row.jobs
+                    )
                         .padStart(9) +
 
-                    row.threads
-                        .toString()
+                    String(
+                        row.threads
+                    )
                         .padStart(10) +
 
-                    row.hosts
-                        .toString()
+                    String(
+                        row.hosts
+                    )
                         .padStart(9)
                 );
             }
@@ -1195,7 +1391,7 @@ export async function main(ns) {
 
             lines.push(
                 color(
-                    "No completed scripts captured in the recent window.",
+                    "No completed scripts captured during the recent window.",
                     COLOR.gray
                 )
             );
@@ -1233,12 +1429,14 @@ export async function main(ns) {
                     )
                         .padStart(14) +
 
-                    row.jobs
-                        .toString()
+                    String(
+                        row.jobs
+                    )
                         .padStart(9) +
 
-                    row.threads
-                        .toString()
+                    String(
+                        row.threads
+                    )
                         .padStart(10)
                 );
             }
@@ -1295,7 +1493,7 @@ export async function main(ns) {
 
             lines.push(
                 color(
-                    "No completed jobs captured by host in the recent window.",
+                    "No completed jobs captured by host during the recent window.",
                     COLOR.gray
                 )
             );
@@ -1333,12 +1531,14 @@ export async function main(ns) {
                     )
                         .padStart(14) +
 
-                    row.jobs
-                        .toString()
+                    String(
+                        row.jobs
+                    )
                         .padStart(9) +
 
-                    row.threads
-                        .toString()
+                    String(
+                        row.threads
+                    )
                         .padStart(10)
                 );
             }
@@ -1346,7 +1546,7 @@ export async function main(ns) {
 
 
         // ========================================================
-        // RUNNING SCRIPT LIFETIME PERFORMANCE
+        // CURRENT RUNNING SCRIPTS
         // ========================================================
 
         section(
@@ -1414,12 +1614,14 @@ export async function main(ns) {
                 )
                     .padStart(18) +
 
-                row.processes
-                    .toString()
+                String(
+                    row.processes
+                )
                     .padStart(8) +
 
-                row.threads
-                    .toString()
+                String(
+                    row.threads
+                )
                     .padStart(10) +
 
                 ns.format.ram(
@@ -1446,46 +1648,63 @@ export async function main(ns) {
 
 
         if (
-            ramUtilization < 50 &&
-            freeRam > 0
+            recentHistoryMayBeIncomplete
         ) {
 
             alerts.push({
-                level: "warning",
+                level:
+                    "warning",
 
                 text:
-                    `${ns.format.ram(freeRam)} ` +
-                    "of rooted RAM is currently unused."
+                    `Recent-script history currently covers only ` +
+                    `${recentHistoryCoverageSeconds.toFixed(0)}s. ` +
+                    `The ${CONFIG.recentWindowSeconds}s realized income rate may be under-reported.`
             });
         }
 
 
         if (
-            currentIncomePerSecond <= 0 &&
-            runningThreads > 0
+            dispatcherInfo.running &&
+            dispatcherUtilization < 50 &&
+            dispatcherFreeRam > 0
         ) {
 
             alerts.push({
-                level: "danger",
+                level:
+                    "warning",
 
                 text:
-                    "Scripts are running, but total script income is currently zero."
+                    `${ns.format.ram(dispatcherFreeRam)} of dispatcher-usable RAM is currently free.`
             });
         }
 
 
         if (
-            capturedIncomePerSecond >
-            currentIncomePerSecond *
-            1.25 &&
-            capturedIncomePerSecond > 0
+            dispatcherInfo.running &&
+            dispatcherRunning.length === 0
         ) {
 
             alerts.push({
-                level: "info",
+                level:
+                    "info",
 
                 text:
-                    "Recent completed hacks are producing more than the current instantaneous income rate suggests."
+                    "Dispatcher is running but no HWGW workers are active at this instant. It may be selecting, preparing, or waiting for work."
+            });
+        }
+
+
+        if (
+            realizedIncomePerSecond <= 0 &&
+            dispatcherRunning.length > 0
+        ) {
+
+            alerts.push({
+                level:
+                    "warning",
+
+                text:
+                    "HWGW workers are active, but no realized hacking income was captured in the last 60 seconds."
             });
         }
 
@@ -1495,21 +1714,12 @@ export async function main(ns) {
         ) {
 
             alerts.push({
-                level: "info",
+                level:
+                    "info",
 
                 text:
-                    "No recently killed scripts are available yet. Dispatcher performance will populate as workers finish."
+                    "No recently killed scripts are available yet. Realized dispatcher statistics will populate when workers finish."
             });
-        }
-
-
-        if (
-            recentScripts.length > 0 &&
-            recentCompleted.length ===
-                recentScripts.length
-        ) {
-
-            // No alert required.
         }
 
 
@@ -1519,17 +1729,14 @@ export async function main(ns) {
 
             lines.push(
                 color(
-                    "✓ No obvious income or RAM utilization problems detected.",
+                    "✓ No obvious dispatcher income or RAM utilization problems detected.",
                     COLOR.brightGreen
                 )
             );
         }
         else {
 
-            for (
-                const alert
-                of alerts
-            ) {
+            for (const alert of alerts) {
 
                 lines.push(
                     formatAlert(
@@ -1561,8 +1768,10 @@ export async function main(ns) {
         lines.push(
             color(
                 `Refresh ${CONFIG.refreshMs / 1000}s  |  ` +
-                `Recent realized window ${CONFIG.recentWindowSeconds}s  |  ` +
-                `Recent-script retention depends on Settings → Recently killed scripts size`,
+                `Realized window ${CONFIG.recentWindowSeconds}s  |  ` +
+                `Recent records ${recentScripts.length}  |  ` +
+                `History ${formatDuration(recentHistoryCoverageSeconds)}  |  ` +
+                `Home reserve ${ns.format.ram(effectiveReserve)}`,
                 COLOR.gray
             )
         );
@@ -1587,7 +1796,6 @@ export async function main(ns) {
                 display
             );
 
-
             lastDisplay =
                 display;
         }
@@ -1601,9 +1809,9 @@ export async function main(ns) {
 
             `INCOME  |  ` +
 
-            `${formatMoney(
+            `Realized ${formatMoney(
                 ns,
-                currentIncomePerSecond
+                realizedIncomePerSecond
             )}/sec  |  ` +
 
             `1m ${formatMoney(
@@ -1611,7 +1819,7 @@ export async function main(ns) {
                 avg1m
             )}/sec  |  ` +
 
-            `RAM ${ramUtilization.toFixed(0)}%`
+            `RAM ${dispatcherUtilization.toFixed(0)}%`
         );
 
 
@@ -1619,6 +1827,140 @@ export async function main(ns) {
             CONFIG.refreshMs
         );
     }
+}
+
+
+// =================================================================
+// DISPATCHER INFORMATION
+// =================================================================
+
+function getDispatcherInfo(
+    ns,
+    dispatcherFilename,
+    defaultReserve
+) {
+
+    const result = {
+        running:
+            false,
+
+        pid:
+            0,
+
+        homeReserve:
+            defaultReserve,
+
+        args:
+            []
+    };
+
+
+    const processes =
+        ns.ps("home");
+
+
+    const dispatcher =
+        processes.find(
+            process =>
+                process.filename ===
+                dispatcherFilename
+        );
+
+
+    if (!dispatcher) {
+        return result;
+    }
+
+
+    result.running =
+        true;
+
+    result.pid =
+        dispatcher.pid;
+
+    result.args =
+        dispatcher.args;
+
+
+    // ============================================================
+    // PARSE --reserve
+    // ============================================================
+
+    for (
+        let i = 0;
+        i < dispatcher.args.length;
+        i++
+    ) {
+
+        const arg =
+            String(
+                dispatcher.args[i]
+            );
+
+
+        if (
+            arg === "--reserve" &&
+            i + 1 <
+                dispatcher.args.length
+        ) {
+
+            const value =
+                Number(
+                    dispatcher.args[
+                        i + 1
+                    ]
+                );
+
+
+            if (
+                Number.isFinite(
+                    value
+                )
+            ) {
+
+                result.homeReserve =
+                    Math.max(
+                        0,
+                        value
+                    );
+            }
+
+
+            continue;
+        }
+
+
+        if (
+            arg.startsWith(
+                "--reserve="
+            )
+        ) {
+
+            const value =
+                Number(
+                    arg.substring(
+                        "--reserve=".length
+                    )
+                );
+
+
+            if (
+                Number.isFinite(
+                    value
+                )
+            ) {
+
+                result.homeReserve =
+                    Math.max(
+                        0,
+                        value
+                    );
+            }
+        }
+    }
+
+
+    return result;
 }
 
 
@@ -1633,14 +1975,9 @@ function determineTarget(
     localTargetScripts
 ) {
 
-    if (
-        script.args
-    ) {
+    if (script.args) {
 
-        for (
-            const arg
-            of script.args
-        ) {
+        for (const arg of script.args) {
 
             const value =
                 String(arg);
@@ -1658,10 +1995,9 @@ function determineTarget(
     }
 
 
-    // -------------------------------------------------------------
-    // Legacy scripts that hack the server they are physically
-    // running on.
-    // -------------------------------------------------------------
+    // ============================================================
+    // LEGACY LOCAL TARGET SCRIPTS
+    // ============================================================
 
     if (
         localTargetScripts.has(
@@ -1679,7 +2015,6 @@ function determineTarget(
 
                 return script.server;
             }
-
         }
         catch {
 
@@ -1693,6 +2028,33 @@ function determineTarget(
 
 
 // =================================================================
+// RECENT SCRIPT UNIQUE KEY
+// =================================================================
+
+function makeRecentScriptKey(
+    script,
+    deathTime
+) {
+
+    const args =
+        Array.isArray(
+            script.args
+        )
+            ? script.args.join("|")
+            : "";
+
+
+    return (
+        `${script.pid ?? "?"}|` +
+        `${script.filename}|` +
+        `${script.server}|` +
+        `${deathTime}|` +
+        `${args}`
+    );
+}
+
+
+// =================================================================
 // ADD AGGREGATE
 // =================================================================
 
@@ -1702,6 +2064,11 @@ function addAggregate(
     script
 ) {
 
+    if (!key) {
+        return;
+    }
+
+
     if (
         !map.has(key)
     ) {
@@ -1709,15 +2076,20 @@ function addAggregate(
         map.set(
             key,
             {
-                name: key,
+                name:
+                    key,
 
-                money: 0,
+                money:
+                    0,
 
-                exp: 0,
+                exp:
+                    0,
 
-                jobs: 0,
+                jobs:
+                    0,
 
-                threads: 0,
+                threads:
+                    0,
 
                 hosts:
                     new Set()
@@ -1731,23 +2103,21 @@ function addAggregate(
 
 
     item.money +=
-        script.onlineMoneyMade;
+        script.onlineMoneyMade ?? 0;
 
 
     item.exp +=
-        script.onlineExpGained;
+        script.onlineExpGained ?? 0;
 
 
     item.jobs++;
 
 
     item.threads +=
-        script.threads;
+        script.threads ?? 0;
 
 
-    if (
-        script.host
-    ) {
+    if (script.host) {
 
         item.hosts.add(
             script.host
@@ -1766,6 +2136,7 @@ function buildAggregateRows(
 ) {
 
     return [...map.values()]
+
         .map(
             item => ({
 
@@ -1792,6 +2163,7 @@ function buildAggregateRows(
                     item.hosts.size
             })
         )
+
         .sort(
             (a, b) =>
                 b.moneyPerSecond -
@@ -1819,14 +2191,10 @@ function averageSamples(
 
 
     let total = 0;
-
     let count = 0;
 
 
-    for (
-        const sample
-        of samples
-    ) {
+    for (const sample of samples) {
 
         if (
             sample.time <
@@ -1839,7 +2207,6 @@ function averageSamples(
 
         total +=
             sample.value;
-
 
         count++;
     }
@@ -1868,11 +2235,14 @@ function getTimeMilliseconds(
 
 
     const parsed =
-        new Date(value)
-            .getTime();
+        new Date(
+            value
+        ).getTime();
 
 
-    return Number.isFinite(parsed)
+    return Number.isFinite(
+        parsed
+    )
         ? parsed
         : 0;
 }
@@ -1887,14 +2257,16 @@ function scanNetwork(ns) {
     const visited =
         new Set();
 
-
-    const servers = [];
+    const servers =
+        [];
 
 
     function scan(server) {
 
         if (
-            visited.has(server)
+            visited.has(
+                server
+            )
         ) {
 
             return;
@@ -1904,7 +2276,6 @@ function scanNetwork(ns) {
         visited.add(
             server
         );
-
 
         servers.push(
             server
@@ -1923,7 +2294,9 @@ function scanNetwork(ns) {
     }
 
 
-    scan("home");
+    scan(
+        "home"
+    );
 
 
     return servers;
@@ -1931,123 +2304,7 @@ function scanNetwork(ns) {
 
 
 // =================================================================
-// INCOME BAR
-// =================================================================
-
-function createIncomeBar(
-    current,
-    average,
-    width
-) {
-
-    if (
-        average <= 0
-    ) {
-
-        return (
-            "Income comparison unavailable until trend history builds."
-        );
-    }
-
-
-    const ratio =
-        current /
-        average;
-
-
-    const normalized =
-        Math.max(
-            0,
-            Math.min(
-                2,
-                ratio
-            )
-        );
-
-
-    const filled =
-        Math.round(
-            (
-                normalized /
-                2
-            ) *
-            width
-        );
-
-
-    return (
-        "5m Avg  [" +
-
-        "█".repeat(
-            filled
-        ) +
-
-        "░".repeat(
-            width -
-            filled
-        ) +
-
-        "]  Current / Avg: " +
-
-        ratio.toFixed(2) +
-
-        "x"
-    );
-}
-
-
-// =================================================================
-// PERCENT BAR
-// =================================================================
-
-function createPercentBar(
-    percent,
-    width
-) {
-
-    const normalized =
-        Math.max(
-            0,
-            Math.min(
-                100,
-                percent
-            )
-        );
-
-
-    const filled =
-        Math.round(
-            (
-                normalized /
-                100
-            ) *
-            width
-        );
-
-
-    return (
-        "[" +
-
-        "█".repeat(
-            filled
-        ) +
-
-        "░".repeat(
-            width -
-            filled
-        ) +
-
-        "] " +
-
-        normalized.toFixed(1) +
-
-        "%"
-    );
-}
-
-
-// =================================================================
-// SECTION
+// DISPLAY SECTION
 // =================================================================
 
 function section(
@@ -2064,7 +2321,7 @@ function section(
         color(
             `[ ${title} ]`,
             COLOR.bold +
-                COLOR.brightCyan
+            COLOR.brightCyan
         )
     );
 
@@ -2092,52 +2349,15 @@ function field(
 
     return (
         `${label}: ${value}`
-            .padEnd(width)
+            .padEnd(
+                width
+            )
     );
 }
 
 
 // =================================================================
-// ALERT
-// =================================================================
-
-function formatAlert(
-    alert,
-    COLOR
-) {
-
-    switch (
-        alert.level
-    ) {
-
-        case "danger":
-
-            return color(
-                `⚠ ${alert.text}`,
-                COLOR.brightRed
-            );
-
-
-        case "warning":
-
-            return color(
-                `⚠ ${alert.text}`,
-                COLOR.brightYellow
-            );
-
-
-        default:
-
-            return color(
-                `• ${alert.text}`,
-                COLOR.brightCyan
-            );
-    }
-}
-
-
-// =================================================================
-// MONEY
+// FORMAT MONEY
 // =================================================================
 
 function formatMoney(
@@ -2146,10 +2366,12 @@ function formatMoney(
 ) {
 
     if (
-        !Number.isFinite(value)
+        !Number.isFinite(
+            value
+        )
     ) {
 
-        return "$0.00";
+        return "$0";
     }
 
 
@@ -2164,7 +2386,7 @@ function formatMoney(
 
 
 // =================================================================
-// DURATION
+// FORMAT DURATION
 // =================================================================
 
 function formatDuration(
@@ -2172,28 +2394,209 @@ function formatDuration(
 ) {
 
     if (
-        seconds < 60
+        !Number.isFinite(
+            seconds
+        ) ||
+        seconds <= 0
+    ) {
+
+        return "0s";
+    }
+
+
+    if (
+        seconds <
+        60
     ) {
 
         return (
-            `${Math.floor(seconds)}s`
+            seconds.toFixed(0) +
+            "s"
         );
     }
 
 
-    const minutes =
-        seconds /
-        60;
+    if (
+        seconds <
+        3600
+    ) {
+
+        return (
+            (
+                seconds /
+                60
+            ).toFixed(1) +
+            "m"
+        );
+    }
 
 
     return (
-        `${minutes.toFixed(1)}m`
+        (
+            seconds /
+            3600
+        ).toFixed(1) +
+        "h"
     );
 }
 
 
 // =================================================================
-// CENTER
+// INCOME BAR
+// =================================================================
+
+function createIncomeBar(
+    current,
+    reference,
+    width
+) {
+
+    if (
+        reference <= 0
+    ) {
+
+        return (
+            "Income trend: " +
+            "█".repeat(
+                Math.min(
+                    width,
+                    current > 0
+                        ? Math.floor(
+                            width *
+                            0.5
+                        )
+                        : 0
+                )
+            )
+        );
+    }
+
+
+    const ratio =
+        Math.max(
+            0,
+            Math.min(
+                2,
+                current /
+                reference
+            )
+        );
+
+
+    const filled =
+        Math.min(
+            width,
+            Math.round(
+                (
+                    ratio /
+                    2
+                ) *
+                width
+            )
+        );
+
+
+    return (
+        "Income trend: [" +
+        "█".repeat(
+            filled
+        ) +
+        "░".repeat(
+            width -
+            filled
+        ) +
+        "]"
+    );
+}
+
+
+// =================================================================
+// PERCENT BAR
+// =================================================================
+
+function createPercentBar(
+    percent,
+    width
+) {
+
+    const safePercent =
+        Math.max(
+            0,
+            Math.min(
+                100,
+                percent
+            )
+        );
+
+
+    const filled =
+        Math.round(
+            (
+                safePercent /
+                100
+            ) *
+            width
+        );
+
+
+    return (
+        "RAM usage:    [" +
+        "█".repeat(
+            filled
+        ) +
+        "░".repeat(
+            width -
+            filled
+        ) +
+        "] " +
+        safePercent.toFixed(1) +
+        "%"
+    );
+}
+
+
+// =================================================================
+// ALERT
+// =================================================================
+
+function formatAlert(
+    alert,
+    COLOR
+) {
+
+    if (
+        alert.level ===
+        "danger"
+    ) {
+
+        return color(
+            `✖ ${alert.text}`,
+            COLOR.brightRed
+        );
+    }
+
+
+    if (
+        alert.level ===
+        "warning"
+    ) {
+
+        return color(
+            `⚠ ${alert.text}`,
+            COLOR.brightYellow
+        );
+    }
+
+
+    return color(
+        `● ${alert.text}`,
+        COLOR.brightCyan
+    );
+}
+
+
+// =================================================================
+// CENTER TEXT
 // =================================================================
 
 function centerText(
@@ -2201,22 +2604,18 @@ function centerText(
     width
 ) {
 
-    const padding =
-        Math.max(
-            0,
-            Math.floor(
-                (
-                    width -
-                    text.length
-                ) /
-                2
-            )
-        );
-
-
     return (
         " ".repeat(
-            padding
+            Math.max(
+                0,
+                Math.floor(
+                    (
+                        width -
+                        text.length
+                    ) /
+                    2
+                )
+            )
         ) +
         text
     );
@@ -2229,11 +2628,11 @@ function centerText(
 
 function color(
     text,
-    code
+    value
 ) {
 
     return (
-        code +
+        value +
         text +
         "\x1b[0m"
     );

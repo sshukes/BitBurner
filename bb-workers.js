@@ -1,20 +1,30 @@
 /** @param {NS} ns */
 export async function main(ns) {
+
     ns.disableLog("ALL");
 
+
     // ============================================================
-    // BITBURNER WORKER / RAM MONITOR
+    // BITBURNER WORKER / RAM / HWGW BATCH MONITOR
     // ============================================================
 
     const CONFIG = {
-        refreshMs: 2000,
-        windowWidth: 1500,
-        windowHeight: 750,
-        separatorWidth: 144,
-        maxTargetRows: 10
+
+        refreshMs: 1000,
+
+        windowWidth: 1550,
+        windowHeight: 850,
+
+        separatorWidth: 148,
+
+        maxTargetRows: 10,
+
+        maxBatchRows: 20
     };
 
+
     const COLOR = {
+
         reset: "\x1b[0m",
         bold: "\x1b[1m",
 
@@ -36,6 +46,19 @@ export async function main(ns) {
         gray: "\x1b[90m"
     };
 
+
+    // ============================================================
+    // DISPATCHER WORKER NAMES
+    // ============================================================
+
+    const DISPATCHER_WORKERS =
+        new Set([
+            "bb-hack-worker.js",
+            "bb-grow-worker.js",
+            "bb-weaken-worker.js"
+        ]);
+
+
     // ============================================================
     // WINDOW
     // ============================================================
@@ -48,10 +71,12 @@ export async function main(ns) {
     );
 
     ns.ui.setTailTitle(
-        "BITBURNER // WORKER & RAM MONITOR"
+        "BITBURNER // WORKER & HWGW MONITOR"
     );
 
+
     let lastDisplay = "";
+
 
     // ============================================================
     // MAIN LOOP
@@ -60,95 +85,185 @@ export async function main(ns) {
     while (true) {
 
         const servers =
-            scanNetwork(ns);
+            scanNetwork(
+                ns
+            );
+
 
         const serverSet =
-            new Set(servers);
+            new Set(
+                servers
+            );
+
 
         const workerHosts = [];
 
+
+        // ========================================================
+        // TARGET ACTIVITY
+        // ========================================================
+
         const targetActivity =
             new Map();
+
+
+        // ========================================================
+        // DISPATCHER BATCH ACTIVITY
+        // ========================================================
+
+        const batchActivity =
+            new Map();
+
+
+        // ========================================================
+        // PREP ACTIVITY
+        // ========================================================
+
+        const prepActivity =
+            new Map();
+
 
         // ========================================================
         // NETWORK TOTALS
         // ========================================================
 
         let totalRam = 0;
+
         let totalUsedRam = 0;
+
         let totalFreeRam = 0;
 
+
         let totalProcesses = 0;
+
         let totalThreads = 0;
 
+
         let totalHackThreads = 0;
+
         let totalGrowThreads = 0;
+
         let totalWeakenThreads = 0;
+
         let totalOtherThreads = 0;
 
+
+        let dispatcherProcesses = 0;
+
+        let dispatcherThreads = 0;
+
+
         let activeHosts = 0;
+
         let idleHosts = 0;
 
+
         // ========================================================
-        // ANALYZE ROOTED SERVERS
+        // ANALYZE ROOTED RAM SERVERS
         // ========================================================
 
-        for (const server of servers) {
+        for (
+            const server
+            of servers
+        ) {
 
-            if (!ns.hasRootAccess(server)) {
+            if (
+                !ns.hasRootAccess(
+                    server
+                )
+            ) {
+
                 continue;
             }
+
 
             const maxRam =
-                ns.getServerMaxRam(server);
+                ns.getServerMaxRam(
+                    server
+                );
 
-            // Ignore servers that cannot execute scripts.
-            if (maxRam <= 0) {
+
+            // Ignore servers that cannot run scripts.
+
+            if (
+                maxRam <= 0
+            ) {
+
                 continue;
             }
 
+
             const usedRam =
-                ns.getServerUsedRam(server);
+                ns.getServerUsedRam(
+                    server
+                );
+
 
             const freeRam =
                 Math.max(
                     0,
-                    maxRam - usedRam
+                    maxRam -
+                    usedRam
                 );
+
 
             const utilization =
                 maxRam > 0
-                    ? (usedRam / maxRam) * 100
+                    ? (
+                        usedRam /
+                        maxRam
+                    ) * 100
                     : 0;
 
+
             const processes =
-                ns.ps(server);
+                ns.ps(
+                    server
+                );
+
 
             let hostThreads = 0;
 
             let hackThreads = 0;
+
             let growThreads = 0;
+
             let weakenThreads = 0;
+
             let otherThreads = 0;
+
+
+            let hostDispatcherProcesses = 0;
+
+            let hostDispatcherThreads = 0;
+
 
             const hostTargets =
                 new Set();
+
 
             // ====================================================
             // PROCESS ANALYSIS
             // ====================================================
 
-            for (const process of processes) {
+            for (
+                const process
+                of processes
+            ) {
 
                 const threads =
                     process.threads;
 
-                hostThreads += threads;
+
+                hostThreads +=
+                    threads;
+
 
                 const action =
                     detectAction(
                         process.filename
                     );
+
 
                 const target =
                     findTarget(
@@ -156,7 +271,14 @@ export async function main(ns) {
                         serverSet
                     );
 
-                if (action === "HACK") {
+
+                // =================================================
+                // GLOBAL H/G/W COUNTS
+                // =================================================
+
+                if (
+                    action === "HACK"
+                ) {
 
                     hackThreads +=
                         threads;
@@ -164,7 +286,9 @@ export async function main(ns) {
                     totalHackThreads +=
                         threads;
                 }
-                else if (action === "GROW") {
+                else if (
+                    action === "GROW"
+                ) {
 
                     growThreads +=
                         threads;
@@ -172,7 +296,9 @@ export async function main(ns) {
                     totalGrowThreads +=
                         threads;
                 }
-                else if (action === "WEAKEN") {
+                else if (
+                    action === "WEAKEN"
+                ) {
 
                     weakenThreads +=
                         threads;
@@ -189,22 +315,176 @@ export async function main(ns) {
                         threads;
                 }
 
+
+                // =================================================
+                // DISPATCHER-SPECIFIC PROCESS
+                // =================================================
+
+                const dispatcherInfo =
+                    parseDispatcherProcess(
+                        process,
+                        DISPATCHER_WORKERS
+                    );
+
+
+                if (
+                    dispatcherInfo
+                ) {
+
+                    dispatcherProcesses++;
+
+                    dispatcherThreads +=
+                        threads;
+
+
+                    hostDispatcherProcesses++;
+
+                    hostDispatcherThreads +=
+                        threads;
+
+
+                    // =============================================
+                    // ACTIVE NORMAL HWGW BATCH
+                    // =============================================
+
+                    if (
+                        dispatcherInfo.type ===
+                        "BATCH"
+                    ) {
+
+                        if (
+                            !batchActivity.has(
+                                dispatcherInfo.batchId
+                            )
+                        ) {
+
+                            batchActivity.set(
+                                dispatcherInfo.batchId,
+                                createBatchRecord(
+                                    dispatcherInfo
+                                )
+                            );
+                        }
+
+
+                        const batch =
+                            batchActivity.get(
+                                dispatcherInfo.batchId
+                            );
+
+
+                        updateBatchRecord(
+                            batch,
+                            dispatcherInfo,
+                            process,
+                            server
+                        );
+                    }
+
+
+                    // =============================================
+                    // PREP WORK
+                    // =============================================
+
+                    if (
+                        dispatcherInfo.type ===
+                        "PREP"
+                    ) {
+
+                        if (
+                            !prepActivity.has(
+                                dispatcherInfo.batchId
+                            )
+                        ) {
+
+                            prepActivity.set(
+                                dispatcherInfo.batchId,
+                                {
+                                    id:
+                                        dispatcherInfo.batchId,
+
+                                    target:
+                                        dispatcherInfo.target,
+
+                                    hosts:
+                                        new Set(),
+
+                                    processes: 0,
+
+                                    threads: 0,
+
+                                    grow: 0,
+
+                                    weaken: 0
+                                }
+                            );
+                        }
+
+
+                        const prep =
+                            prepActivity.get(
+                                dispatcherInfo.batchId
+                            );
+
+
+                        prep.hosts.add(
+                            server
+                        );
+
+
+                        prep.processes++;
+
+
+                        prep.threads +=
+                            threads;
+
+
+                        if (
+                            dispatcherInfo.stage ===
+                            "PREP-G"
+                        ) {
+
+                            prep.grow +=
+                                threads;
+                        }
+
+
+                        if (
+                            dispatcherInfo.stage ===
+                            "PREP-W"
+                        ) {
+
+                            prep.weaken +=
+                                threads;
+                        }
+                    }
+                }
+
+
                 // =================================================
                 // TARGET ACTIVITY
                 // =================================================
 
-                if (target) {
+                if (
+                    target
+                ) {
 
-                    hostTargets.add(target);
+                    hostTargets.add(
+                        target
+                    );
+
 
                     if (
-                        !targetActivity.has(target)
+                        !targetActivity.has(
+                            target
+                        )
                     ) {
 
                         targetActivity.set(
                             target,
                             {
                                 processes: 0,
+
                                 threads: 0,
 
                                 hack: 0,
@@ -212,24 +492,34 @@ export async function main(ns) {
                                 weaken: 0,
                                 other: 0,
 
-                                hosts: new Set()
+                                hosts:
+                                    new Set()
                             }
                         );
                     }
 
+
                     const activity =
-                        targetActivity.get(target);
+                        targetActivity.get(
+                            target
+                        );
+
 
                     activity.processes++;
 
+
                     activity.threads +=
                         threads;
+
 
                     activity.hosts.add(
                         server
                     );
 
-                    switch (action) {
+
+                    switch (
+                        action
+                    ) {
 
                         case "HACK":
 
@@ -238,6 +528,7 @@ export async function main(ns) {
 
                             break;
 
+
                         case "GROW":
 
                             activity.grow +=
@@ -245,12 +536,14 @@ export async function main(ns) {
 
                             break;
 
+
                         case "WEAKEN":
 
                             activity.weaken +=
                                 threads;
 
                             break;
+
 
                         default:
 
@@ -262,13 +555,17 @@ export async function main(ns) {
                 }
             }
 
+
             // ====================================================
             // HOST STATUS
             // ====================================================
 
             let status;
 
-            if (processes.length === 0) {
+
+            if (
+                processes.length === 0
+            ) {
 
                 status =
                     "IDLE";
@@ -283,29 +580,37 @@ export async function main(ns) {
                 activeHosts++;
             }
 
+
             // ====================================================
-            // TOTALS
+            // NETWORK TOTALS
             // ====================================================
 
-            totalRam += maxRam;
+            totalRam +=
+                maxRam;
+
 
             totalUsedRam +=
                 usedRam;
 
+
             totalFreeRam +=
                 freeRam;
+
 
             totalProcesses +=
                 processes.length;
 
+
             totalThreads +=
                 hostThreads;
+
 
             // ====================================================
             // SAVE HOST
             // ====================================================
 
             workerHosts.push({
+
                 server,
 
                 status,
@@ -326,17 +631,20 @@ export async function main(ns) {
                 weakenThreads,
                 otherThreads,
 
+                dispatcherProcesses:
+                    hostDispatcherProcesses,
+
+                dispatcherThreads:
+                    hostDispatcherThreads,
+
                 targets:
                     [...hostTargets]
             });
         }
 
+
         // ========================================================
-        // SORT WORKERS
-        //
-        // Active first
-        // Highest used RAM next
-        // Largest servers after that
+        // SORT WORKER HOSTS
         // ========================================================
 
         workerHosts.sort(
@@ -354,6 +662,7 @@ export async function main(ns) {
                     );
                 }
 
+
                 if (
                     b.usedRam !==
                     a.usedRam
@@ -365,12 +674,14 @@ export async function main(ns) {
                     );
                 }
 
+
                 return (
                     b.maxRam -
                     a.maxRam
                 );
             }
         );
+
 
         // ========================================================
         // NETWORK UTILIZATION
@@ -383,6 +694,7 @@ export async function main(ns) {
                     totalRam
                 ) * 100
                 : 0;
+
 
         // ========================================================
         // TARGET LIST
@@ -402,11 +714,66 @@ export async function main(ns) {
                         a.threads
                 );
 
+
+        // ========================================================
+        // BATCH LIST
+        // ========================================================
+
+        const batchRows =
+            [...batchActivity.values()]
+                .sort(
+                    compareBatchIds
+                );
+
+
+        // ========================================================
+        // PREP LIST
+        // ========================================================
+
+        const prepRows =
+            [...prepActivity.values()]
+                .sort(
+                    (a, b) =>
+                        b.threads -
+                        a.threads
+                );
+
+
+        // ========================================================
+        // BATCH SUMMARY
+        // ========================================================
+
+        let completeBatches = 0;
+
+        let partialBatches = 0;
+
+
+        for (
+            const batch
+            of batchRows
+        ) {
+
+            if (
+                isCompleteBatch(
+                    batch
+                )
+            ) {
+
+                completeBatches++;
+            }
+            else {
+
+                partialBatches++;
+            }
+        }
+
+
         // ========================================================
         // BUILD DISPLAY
         // ========================================================
 
         const lines = [];
+
 
         // ========================================================
         // HEADER
@@ -421,16 +788,18 @@ export async function main(ns) {
             )
         );
 
+
         lines.push(
             color(
                 centerText(
-                    "BITBURNER // WORKER & RAM MONITOR",
+                    "BITBURNER // WORKER & HWGW MONITOR",
                     CONFIG.separatorWidth
                 ),
                 COLOR.bold +
-                    COLOR.brightWhite
+                COLOR.brightWhite
             )
         );
+
 
         lines.push(
             color(
@@ -441,8 +810,9 @@ export async function main(ns) {
             )
         );
 
+
         // ========================================================
-        // NETWORK SUMMARY
+        // NETWORK RAM
         // ========================================================
 
         sectionTitle(
@@ -452,23 +822,30 @@ export async function main(ns) {
             COLOR
         );
 
+
         lines.push(
 
             field(
                 "Capacity",
-                ns.format.ram(totalRam),
+                ns.format.ram(
+                    totalRam
+                ),
                 28
             ) +
 
             field(
                 "Used",
-                ns.format.ram(totalUsedRam),
+                ns.format.ram(
+                    totalUsedRam
+                ),
                 28
             ) +
 
             field(
                 "Free",
-                ns.format.ram(totalFreeRam),
+                ns.format.ram(
+                    totalFreeRam
+                ),
                 28
             ) +
 
@@ -479,6 +856,7 @@ export async function main(ns) {
             )
         );
 
+
         lines.push(
             createBar(
                 utilization,
@@ -486,8 +864,9 @@ export async function main(ns) {
             )
         );
 
+
         // ========================================================
-        // WORKLOAD SUMMARY
+        // WORKLOAD
         // ========================================================
 
         sectionTitle(
@@ -496,6 +875,7 @@ export async function main(ns) {
             CONFIG,
             COLOR
         );
+
 
         lines.push(
 
@@ -530,6 +910,7 @@ export async function main(ns) {
             )
         );
 
+
         lines.push(
 
             field(
@@ -557,8 +938,313 @@ export async function main(ns) {
             )
         );
 
+
+        lines.push(
+
+            field(
+                "Dispatcher Proc",
+                dispatcherProcesses,
+                28
+            ) +
+
+            field(
+                "Dispatcher Threads",
+                dispatcherThreads,
+                30
+            ) +
+
+            field(
+                "Active Batches",
+                batchRows.length,
+                26
+            ) +
+
+            field(
+                "Prep Operations",
+                prepRows.length,
+                26
+            )
+        );
+
+
         // ========================================================
-        // WORKER TABLE
+        // ACTIVE HWGW BATCHES
+        // ========================================================
+
+        sectionTitle(
+            lines,
+            "ACTIVE HWGW BATCHES",
+            CONFIG,
+            COLOR
+        );
+
+
+        lines.push(
+
+            "BATCH"
+                .padEnd(25) +
+
+            "TARGET"
+                .padEnd(24) +
+
+            "HOSTS"
+                .padStart(7) +
+
+            "PROC"
+                .padStart(7) +
+
+            "H"
+                .padStart(9) +
+
+            "W1"
+                .padStart(9) +
+
+            "G"
+                .padStart(9) +
+
+            "W2"
+                .padStart(9) +
+
+            "THREADS"
+                .padStart(11) +
+
+            "STATE"
+                .padStart(14)
+        );
+
+
+        lines.push(
+            color(
+                "─".repeat(
+                    CONFIG.separatorWidth
+                ),
+                COLOR.gray
+            )
+        );
+
+
+        if (
+            batchRows.length === 0
+        ) {
+
+            lines.push(
+                color(
+                    "No active dispatcher HWGW batches detected.",
+                    COLOR.gray
+                )
+            );
+        }
+        else {
+
+            for (
+                const batch
+                of batchRows.slice(
+                    0,
+                    CONFIG.maxBatchRows
+                )
+            ) {
+
+                const complete =
+                    isCompleteBatch(
+                        batch
+                    );
+
+
+                const stateText =
+                    complete
+                        ? color(
+                            "COMPLETE",
+                            COLOR.brightGreen
+                        )
+                        : color(
+                            "PARTIAL",
+                            COLOR.brightYellow
+                        );
+
+
+                lines.push(
+
+                    truncate(
+                        batch.id,
+                        24
+                    )
+                        .padEnd(25) +
+
+                    truncate(
+                        batch.target,
+                        23
+                    )
+                        .padEnd(24) +
+
+                    batch.hosts.size
+                        .toString()
+                        .padStart(7) +
+
+                    batch.processes
+                        .toString()
+                        .padStart(7) +
+
+                    batch.hack
+                        .toString()
+                        .padStart(9) +
+
+                    batch.weaken1
+                        .toString()
+                        .padStart(9) +
+
+                    batch.grow
+                        .toString()
+                        .padStart(9) +
+
+                    batch.weaken2
+                        .toString()
+                        .padStart(9) +
+
+                    batch.threads
+                        .toString()
+                        .padStart(11) +
+
+                    padColoredStart(
+                        stateText,
+                        complete
+                            ? 8
+                            : 7,
+                        14
+                    )
+                );
+            }
+
+
+            if (
+                batchRows.length >
+                CONFIG.maxBatchRows
+            ) {
+
+                lines.push(
+                    color(
+                        `... ${batchRows.length - CONFIG.maxBatchRows} more active batches`,
+                        COLOR.gray
+                    )
+                );
+            }
+
+
+            lines.push("");
+
+
+            lines.push(
+
+                field(
+                    "Complete",
+                    completeBatches,
+                    24
+                ) +
+
+                field(
+                    "Partial",
+                    partialBatches,
+                    24
+                )
+            );
+        }
+
+
+        // ========================================================
+        // PREP OPERATIONS
+        // ========================================================
+
+        if (
+            prepRows.length > 0
+        ) {
+
+            sectionTitle(
+                lines,
+                "TARGET PREP",
+                CONFIG,
+                COLOR
+            );
+
+
+            lines.push(
+
+                "OPERATION"
+                    .padEnd(30) +
+
+                "TARGET"
+                    .padEnd(26) +
+
+                "HOSTS"
+                    .padStart(8) +
+
+                "PROC"
+                    .padStart(8) +
+
+                "GROW"
+                    .padStart(10) +
+
+                "WEAKEN"
+                    .padStart(10) +
+
+                "THREADS"
+                    .padStart(10)
+            );
+
+
+            lines.push(
+                color(
+                    "─".repeat(
+                        CONFIG.separatorWidth
+                    ),
+                    COLOR.gray
+                )
+            );
+
+
+            for (
+                const prep
+                of prepRows
+            ) {
+
+                lines.push(
+
+                    truncate(
+                        prep.id,
+                        29
+                    )
+                        .padEnd(30) +
+
+                    truncate(
+                        prep.target,
+                        25
+                    )
+                        .padEnd(26) +
+
+                    prep.hosts.size
+                        .toString()
+                        .padStart(8) +
+
+                    prep.processes
+                        .toString()
+                        .padStart(8) +
+
+                    prep.grow
+                        .toString()
+                        .padStart(10) +
+
+                    prep.weaken
+                        .toString()
+                        .padStart(10) +
+
+                    prep.threads
+                        .toString()
+                        .padStart(10)
+                );
+            }
+        }
+
+
+        // ========================================================
+        // WORKER HOSTS
         // ========================================================
 
         sectionTitle(
@@ -568,25 +1254,26 @@ export async function main(ns) {
             COLOR
         );
 
+
         const header =
 
             "SERVER"
-                .padEnd(24) +
+                .padEnd(23) +
 
             "STATUS"
                 .padEnd(10) +
 
             "USED"
-                .padStart(12) +
+                .padStart(11) +
 
             "MAX"
-                .padStart(12) +
+                .padStart(11) +
 
             "FREE"
-                .padStart(12) +
+                .padStart(11) +
 
             "UTIL"
-                .padStart(9) +
+                .padStart(8) +
 
             "PROC"
                 .padStart(7) +
@@ -603,19 +1290,21 @@ export async function main(ns) {
             "W"
                 .padStart(7) +
 
-            "OTHER"
+            "DISP"
                 .padStart(8) +
 
             "TARGETS"
-                .padStart(20);
+                .padStart(21);
+
 
         lines.push(
             color(
                 header,
                 COLOR.bold +
-                    COLOR.brightWhite
+                COLOR.brightWhite
             )
         );
+
 
         lines.push(
             color(
@@ -626,9 +1315,6 @@ export async function main(ns) {
             )
         );
 
-        // ========================================================
-        // WORKER ROWS
-        // ========================================================
 
         for (
             const host
@@ -636,26 +1322,34 @@ export async function main(ns) {
         ) {
 
             const statusText =
-                host.status === "ACTIVE"
+                host.status ===
+                "ACTIVE"
+
                     ? color(
                         "ACTIVE",
                         COLOR.brightGreen
                     )
+
                     : color(
                         "IDLE",
                         COLOR.gray
                     );
 
+
             const targetText =
                 formatTargets(
                     host.targets,
-                    18
+                    19
                 );
+
 
             const row =
 
-                host.server
-                    .padEnd(24) +
+                truncate(
+                    host.server,
+                    22
+                )
+                    .padEnd(23) +
 
                 padColored(
                     statusText,
@@ -666,24 +1360,24 @@ export async function main(ns) {
                 ns.format.ram(
                     host.usedRam
                 )
-                    .padStart(12) +
+                    .padStart(11) +
 
                 ns.format.ram(
                     host.maxRam
                 )
-                    .padStart(12) +
+                    .padStart(11) +
 
                 ns.format.ram(
                     host.freeRam
                 )
-                    .padStart(12) +
+                    .padStart(11) +
 
                 (
                     host.utilization
                         .toFixed(0) +
                     "%"
                 )
-                    .padStart(9) +
+                    .padStart(8) +
 
                 host.processes
                     .toString()
@@ -705,18 +1399,22 @@ export async function main(ns) {
                     .toString()
                     .padStart(7) +
 
-                host.otherThreads
+                host.dispatcherThreads
                     .toString()
                     .padStart(8) +
 
                 targetText
-                    .padStart(20);
+                    .padStart(21);
 
-            lines.push(row);
+
+            lines.push(
+                row
+            );
         }
 
+
         // ========================================================
-        // TARGET DISTRIBUTION
+        // TARGET WORKLOAD
         // ========================================================
 
         sectionTitle(
@@ -725,6 +1423,7 @@ export async function main(ns) {
             CONFIG,
             COLOR
         );
+
 
         lines.push(
 
@@ -753,6 +1452,7 @@ export async function main(ns) {
                 .padStart(10)
         );
 
+
         lines.push(
             color(
                 "─".repeat(
@@ -761,6 +1461,7 @@ export async function main(ns) {
                 COLOR.gray
             )
         );
+
 
         if (
             targetRows.length === 0
@@ -819,6 +1520,7 @@ export async function main(ns) {
             }
         }
 
+
         // ========================================================
         // ATTENTION
         // ========================================================
@@ -830,7 +1532,9 @@ export async function main(ns) {
             COLOR
         );
 
+
         const alerts = [];
+
 
         if (
             utilization < 50 &&
@@ -839,7 +1543,9 @@ export async function main(ns) {
 
             alerts.push(
                 {
-                    level: "warning",
+                    level:
+                        "warning",
+
                     text:
                         `${ns.format.ram(totalFreeRam)} ` +
                         "of rooted RAM is currently unused."
@@ -847,13 +1553,16 @@ export async function main(ns) {
             );
         }
 
+
         if (
             idleHosts > 0
         ) {
 
             alerts.push(
                 {
-                    level: "info",
+                    level:
+                        "info",
+
                     text:
                         `${idleHosts} RAM host` +
                         `${idleHosts === 1 ? "" : "s"} ` +
@@ -861,6 +1570,7 @@ export async function main(ns) {
                 }
             );
         }
+
 
         if (
             totalHackThreads === 0 &&
@@ -870,12 +1580,49 @@ export async function main(ns) {
 
             alerts.push(
                 {
-                    level: "danger",
+                    level:
+                        "danger",
+
                     text:
                         "No Hack/Grow/Weaken worker threads detected."
                 }
             );
         }
+
+
+        if (
+            dispatcherProcesses === 0
+        ) {
+
+            alerts.push(
+                {
+                    level:
+                        "info",
+
+                    text:
+                        "No bb-dispatcher worker processes are currently running."
+                }
+            );
+        }
+
+
+        if (
+            partialBatches > 0
+        ) {
+
+            alerts.push(
+                {
+                    level:
+                        "warning",
+
+                    text:
+                        `${partialBatches} active HWGW batch` +
+                        `${partialBatches === 1 ? "" : "es"} ` +
+                        "currently appear incomplete."
+                }
+            );
+        }
+
 
         if (
             targetRows.length === 1
@@ -883,12 +1630,15 @@ export async function main(ns) {
 
             alerts.push(
                 {
-                    level: "info",
+                    level:
+                        "info",
+
                     text:
                         "All detected HGW activity is concentrated on one target."
                 }
             );
         }
+
 
         if (
             alerts.length === 0
@@ -896,7 +1646,7 @@ export async function main(ns) {
 
             lines.push(
                 color(
-                    "✓ Worker network appears fully utilized.",
+                    "✓ Worker network appears healthy.",
                     COLOR.brightGreen
                 )
             );
@@ -917,11 +1667,13 @@ export async function main(ns) {
             }
         }
 
+
         // ========================================================
         // FOOTER
         // ========================================================
 
         lines.push("");
+
 
         lines.push(
             color(
@@ -932,45 +1684,61 @@ export async function main(ns) {
             )
         );
 
+
         lines.push(
             color(
                 `Refresh: ${CONFIG.refreshMs / 1000}s` +
-                "  |  H/G/W thread counts are inferred from script filename + target arguments.",
+                "  |  Dispatcher batches are identified from worker args: target, delay, batchId, stage.",
                 COLOR.gray
             )
         );
+
 
         // ========================================================
         // DISPLAY
         // ========================================================
 
         const display =
-            lines.join("\n");
+            lines.join(
+                "\n"
+            );
+
 
         if (
-            display !== lastDisplay
+            display !==
+            lastDisplay
         ) {
 
             ns.clearLog();
+
 
             ns.print(
                 display
             );
 
+
             lastDisplay =
                 display;
         }
+
 
         // ========================================================
         // TITLE BAR
         // ========================================================
 
         ns.ui.setTailTitle(
+
             `WORKERS  |  ` +
+
             `${ns.format.ram(totalUsedRam)} / ${ns.format.ram(totalRam)}  |  ` +
+
             `${utilization.toFixed(0)}% RAM  |  ` +
-            `${totalThreads} Threads`
+
+            `${batchRows.length} Batches  |  ` +
+
+            `${dispatcherThreads} Dispatcher Threads`
         );
+
 
         await ns.sleep(
             CONFIG.refreshMs
@@ -980,38 +1748,410 @@ export async function main(ns) {
 
 
 // ================================================================
+// CREATE EMPTY BATCH RECORD
+// ================================================================
+
+function createBatchRecord(
+    info
+) {
+
+    return {
+
+        id:
+            info.batchId,
+
+        target:
+            info.target,
+
+        hosts:
+            new Set(),
+
+        processes: 0,
+
+        threads: 0,
+
+        hack: 0,
+
+        weaken1: 0,
+
+        grow: 0,
+
+        weaken2: 0
+    };
+}
+
+
+// ================================================================
+// UPDATE BATCH RECORD
+// ================================================================
+
+function updateBatchRecord(
+    batch,
+    info,
+    process,
+    host
+) {
+
+    batch.hosts.add(
+        host
+    );
+
+
+    batch.processes++;
+
+
+    batch.threads +=
+        process.threads;
+
+
+    switch (
+        info.stage
+    ) {
+
+        case "H":
+
+            batch.hack +=
+                process.threads;
+
+            break;
+
+
+        case "W1":
+
+            batch.weaken1 +=
+                process.threads;
+
+            break;
+
+
+        case "G":
+
+            batch.grow +=
+                process.threads;
+
+            break;
+
+
+        case "W2":
+
+            batch.weaken2 +=
+                process.threads;
+
+            break;
+    }
+}
+
+
+// ================================================================
+// CHECK WHETHER ALL FOUR HWGW STAGES ARE PRESENT
+// ================================================================
+
+function isCompleteBatch(
+    batch
+) {
+
+    return (
+        batch.hack > 0 &&
+        batch.weaken1 > 0 &&
+        batch.grow > 0 &&
+        batch.weaken2 > 0
+    );
+}
+
+
+// ================================================================
+// PARSE BB-DISPATCHER PROCESS
+//
+// Expected args:
+//
+// [0] target
+// [1] additionalMsec
+// [2] batch ID
+// [3] stage
+//
+// Normal batches:
+//
+// B0-123456789  H
+// B0-123456789  W1
+// B0-123456789  G
+// B0-123456789  W2
+//
+// Prep:
+//
+// PREP-W-123456
+// PREP-G-123456
+// ================================================================
+
+function parseDispatcherProcess(
+    process,
+    dispatcherWorkers
+) {
+
+    if (
+        !dispatcherWorkers.has(
+            process.filename
+        )
+    ) {
+
+        return null;
+    }
+
+
+    if (
+        !process.args ||
+        process.args.length < 4
+    ) {
+
+        return null;
+    }
+
+
+    const target =
+        String(
+            process.args[0] ??
+            ""
+        );
+
+
+    const delay =
+        Number(
+            process.args[1] ??
+            0
+        );
+
+
+    const batchId =
+        String(
+            process.args[2] ??
+            ""
+        );
+
+
+    const stage =
+        String(
+            process.args[3] ??
+            ""
+        );
+
+
+    if (
+        !target ||
+        !batchId ||
+        !stage
+    ) {
+
+        return null;
+    }
+
+
+    let type =
+        "UNKNOWN";
+
+
+    if (
+        batchId.startsWith(
+            "B"
+        ) &&
+        (
+            stage === "H" ||
+            stage === "W1" ||
+            stage === "G" ||
+            stage === "W2"
+        )
+    ) {
+
+        type =
+            "BATCH";
+    }
+
+
+    if (
+        batchId.startsWith(
+            "PREP"
+        ) ||
+        stage.startsWith(
+            "PREP"
+        )
+    ) {
+
+        type =
+            "PREP";
+    }
+
+
+    if (
+        type === "UNKNOWN"
+    ) {
+
+        return null;
+    }
+
+
+    return {
+
+        type,
+
+        target,
+
+        delay,
+
+        batchId,
+
+        stage
+    };
+}
+
+
+// ================================================================
+// SORT BATCH IDS
+//
+// Dispatcher IDs look like:
+//
+// B0-123456789
+// B1-123456789
+// B2-123456789
+// ================================================================
+
+function compareBatchIds(
+    a,
+    b
+) {
+
+    const aInfo =
+        splitBatchId(
+            a.id
+        );
+
+
+    const bInfo =
+        splitBatchId(
+            b.id
+        );
+
+
+    // Newer launches first.
+
+    if (
+        aInfo.launchId !==
+        bInfo.launchId
+    ) {
+
+        return (
+            bInfo.launchId -
+            aInfo.launchId
+        );
+    }
+
+
+    // Then batch sequence.
+
+    return (
+        aInfo.index -
+        bInfo.index
+    );
+}
+
+
+// ================================================================
+// SPLIT BATCH ID
+// ================================================================
+
+function splitBatchId(
+    id
+) {
+
+    const match =
+        /^B(\d+)-(\d+)$/.exec(
+            id
+        );
+
+
+    if (
+        !match
+    ) {
+
+        return {
+            index:
+                Number.MAX_SAFE_INTEGER,
+
+            launchId:
+                0
+        };
+    }
+
+
+    return {
+
+        index:
+            Number(
+                match[1]
+            ),
+
+        launchId:
+            Number(
+                match[2]
+            )
+    };
+}
+
+
+// ================================================================
 // SCAN NETWORK
 // ================================================================
 
-function scanNetwork(ns) {
+function scanNetwork(
+    ns
+) {
 
     const visited =
         new Set();
 
+
     const servers = [];
 
-    function scan(server) {
+
+    function scan(
+        server
+    ) {
 
         if (
-            visited.has(server)
+            visited.has(
+                server
+            )
         ) {
+
             return;
         }
 
-        visited.add(server);
 
-        servers.push(server);
+        visited.add(
+            server
+        );
+
+
+        servers.push(
+            server
+        );
+
 
         for (
             const neighbor
-            of ns.scan(server)
+            of ns.scan(
+                server
+            )
         ) {
 
-            scan(neighbor);
+            scan(
+                neighbor
+            );
         }
     }
 
-    scan("home");
+
+    scan(
+        "home"
+    );
+
 
     return servers;
 }
@@ -1021,34 +2161,43 @@ function scanNetwork(ns) {
 // DETECT ACTION
 // ================================================================
 
-function detectAction(filename) {
+function detectAction(
+    filename
+) {
 
     const name =
         filename.toLowerCase();
 
-    // Check weaken before hack because filenames can contain
-    // additional descriptive text.
 
     if (
-        name.includes("weaken")
+        name.includes(
+            "weaken"
+        )
     ) {
 
         return "WEAKEN";
     }
 
+
     if (
-        name.includes("grow")
+        name.includes(
+            "grow"
+        )
     ) {
 
         return "GROW";
     }
 
+
     if (
-        name.includes("hack")
+        name.includes(
+            "hack"
+        )
     ) {
 
         return "HACK";
     }
+
 
     return "OTHER";
 }
@@ -1063,9 +2212,13 @@ function findTarget(
     serverSet
 ) {
 
-    if (!args) {
+    if (
+        !args
+    ) {
+
         return null;
     }
+
 
     for (
         const arg
@@ -1073,15 +2226,21 @@ function findTarget(
     ) {
 
         const value =
-            String(arg);
+            String(
+                arg
+            );
+
 
         if (
-            serverSet.has(value)
+            serverSet.has(
+                value
+            )
         ) {
 
             return value;
         }
     }
+
 
     return null;
 }
@@ -1103,8 +2262,12 @@ function formatTargets(
         return "-";
     }
 
+
     const text =
-        targets.join(",");
+        targets.join(
+            ","
+        );
+
 
     if (
         text.length <=
@@ -1114,10 +2277,48 @@ function formatTargets(
         return text;
     }
 
+
     return (
         text.substring(
             0,
             maxLength - 3
+        ) +
+        "..."
+    );
+}
+
+
+// ================================================================
+// TRUNCATE TEXT
+// ================================================================
+
+function truncate(
+    value,
+    maxLength
+) {
+
+    const text =
+        String(
+            value
+        );
+
+
+    if (
+        text.length <=
+        maxLength
+    ) {
+
+        return text;
+    }
+
+
+    return (
+        text.substring(
+            0,
+            Math.max(
+                0,
+                maxLength - 3
+            )
         ) +
         "..."
     );
@@ -1137,13 +2338,15 @@ function sectionTitle(
 
     lines.push("");
 
+
     lines.push(
         color(
             `[ ${title} ]`,
             colors.bold +
-                colors.brightCyan
+            colors.brightCyan
         )
     );
+
 
     lines.push(
         color(
@@ -1168,7 +2371,9 @@ function field(
 
     return (
         `${label}: ${value}`
-            .padEnd(width)
+            .padEnd(
+                width
+            )
     );
 }
 
@@ -1191,6 +2396,7 @@ function createBar(
             )
         );
 
+
     const filled =
         Math.round(
             (
@@ -1200,14 +2406,20 @@ function createBar(
             width
         );
 
+
     return (
         "[" +
-        "█".repeat(filled) +
+        "█".repeat(
+            filled
+        ) +
         "░".repeat(
-            width - filled
+            width -
+            filled
         ) +
         "] " +
-        normalized.toFixed(1) +
+        normalized.toFixed(
+            1
+        ) +
         "%"
     );
 }
@@ -1233,12 +2445,14 @@ function formatAlert(
                 colors.brightRed
             );
 
+
         case "warning":
 
             return color(
                 `⚠ ${alert.text}`,
                 colors.brightYellow
             );
+
 
         default:
 
@@ -1271,8 +2485,11 @@ function centerText(
             )
         );
 
+
     return (
-        " ".repeat(padding) +
+        " ".repeat(
+            padding
+        ) +
         text
     );
 }
@@ -1296,10 +2513,7 @@ function color(
 
 
 // ================================================================
-// PAD ANSI COLORED TEXT
-//
-// ANSI escape characters count as string characters, but do not
-// occupy screen space. This keeps colored STATUS columns aligned.
+// PAD COLORED TEXT TO THE RIGHT
 // ================================================================
 
 function padColored(
@@ -1317,5 +2531,28 @@ function padColored(
                 visibleLength
             )
         )
+    );
+}
+
+
+// ================================================================
+// PAD COLORED TEXT TO THE LEFT
+// ================================================================
+
+function padColoredStart(
+    coloredText,
+    visibleLength,
+    width
+) {
+
+    return (
+        " ".repeat(
+            Math.max(
+                0,
+                width -
+                visibleLength
+            )
+        ) +
+        coloredText
     );
 }

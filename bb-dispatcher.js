@@ -1,32 +1,21 @@
 /** @param {NS} ns */
 export async function main(ns) {
+
     ns.disableLog("ALL");
 
+
     // ============================================================
-    // BITBURNER AUTOMATIC HWGW DISPATCHER
+    // RUN FROM HOME
     // ============================================================
-    //
-    // Features:
-    //
-    // 1. Scans all rooted RAM hosts
-    // 2. Automatically selects a profitable target
-    // 3. Prepares target:
-    //      - Security -> minimum
-    //      - Money -> maximum
-    // 4. Calculates HWGW batch thread requirements
-    // 5. Distributes workers across ALL available rooted RAM
-    // 6. Uses additionalMsec for ordered completion
-    // 7. Never launches a partially allocated batch
-    // 8. Continuously re-evaluates target state
-    //
-    // Batch landing order:
-    //
-    //     HACK
-    //     WEAKEN 1
-    //     GROW
-    //     WEAKEN 2
-    //
-    // ============================================================
+
+    if (ns.getHostname() !== "home") {
+
+        ns.tprint(
+            "ERROR: bb-dispatcher.js must be run from home."
+        );
+
+        return;
+    }
 
 
     // ============================================================
@@ -42,7 +31,9 @@ export async function main(ns) {
         ["dry-run", false]
     ]);
 
+
     const CONFIG = {
+
         refreshMs: 1000,
 
         targetHackFraction:
@@ -73,21 +64,23 @@ export async function main(ns) {
             ),
 
         targetOverride:
-            String(flags.target ?? ""),
+            String(
+                flags.target ?? ""
+            ),
 
         dryRun:
-            Boolean(flags["dry-run"]),
+            Boolean(
+                flags["dry-run"]
+            ),
 
         readyMoneyPercent: 0.99,
 
         readySecurityDelta: 0.05,
 
-        // Prevent shotgun batches from temporarily
-        // draining essentially all target money.
         maxAggregateHackFraction: 0.80,
 
         windowWidth: 1350,
-        windowHeight: 720,
+        windowHeight: 750,
 
         separatorWidth: 128
     };
@@ -98,9 +91,80 @@ export async function main(ns) {
     // ============================================================
 
     const WORKER = {
-        hack: "bb-hack-worker.js",
-        grow: "bb-grow-worker.js",
-        weaken: "bb-weaken-worker.js"
+
+        hack:
+            "bb-hack-worker.js",
+
+        grow:
+            "bb-grow-worker.js",
+
+        weaken:
+            "bb-weaken-worker.js"
+    };
+
+
+    // ============================================================
+    // WORKER SOURCE
+    // ============================================================
+
+    const WORKER_CODE = {
+
+        hack:
+`/** @param {NS} ns */
+export async function main(ns) {
+
+    const target =
+        String(ns.args[0]);
+
+    const additionalMsec =
+        Number(ns.args[1] ?? 0);
+
+    await ns.hack(
+        target,
+        {
+            additionalMsec
+        }
+    );
+}
+`,
+
+        grow:
+`/** @param {NS} ns */
+export async function main(ns) {
+
+    const target =
+        String(ns.args[0]);
+
+    const additionalMsec =
+        Number(ns.args[1] ?? 0);
+
+    await ns.grow(
+        target,
+        {
+            additionalMsec
+        }
+    );
+}
+`,
+
+        weaken:
+`/** @param {NS} ns */
+export async function main(ns) {
+
+    const target =
+        String(ns.args[0]);
+
+    const additionalMsec =
+        Number(ns.args[1] ?? 0);
+
+    await ns.weaken(
+        target,
+        {
+            additionalMsec
+        }
+    );
+}
+`
     };
 
 
@@ -109,42 +173,54 @@ export async function main(ns) {
     // ============================================================
 
     const COLOR = {
-        reset: "\x1b[0m",
-        bold: "\x1b[1m",
 
-        brightWhite: "\x1b[97m",
-        brightCyan: "\x1b[96m",
-        brightGreen: "\x1b[92m",
-        brightYellow: "\x1b[93m",
-        brightRed: "\x1b[91m",
+        reset:
+            "\x1b[0m",
 
-        gray: "\x1b[90m"
+        bold:
+            "\x1b[1m",
+
+        brightWhite:
+            "\x1b[97m",
+
+        brightCyan:
+            "\x1b[96m",
+
+        brightGreen:
+            "\x1b[92m",
+
+        brightYellow:
+            "\x1b[93m",
+
+        brightRed:
+            "\x1b[91m",
+
+        gray:
+            "\x1b[90m"
     };
 
 
     // ============================================================
-    // VERIFY WORKERS
+    // CREATE / REPAIR WORKERS
     // ============================================================
 
-    for (
-        const script
-        of Object.values(WORKER)
-    ) {
+    await ensureWorker(
+        ns,
+        WORKER.hack,
+        WORKER_CODE.hack
+    );
 
-        if (
-            !ns.fileExists(
-                script,
-                "home"
-            )
-        ) {
+    await ensureWorker(
+        ns,
+        WORKER.grow,
+        WORKER_CODE.grow
+    );
 
-            ns.tprint(
-                `ERROR: Missing worker: ${script}`
-            );
-
-            return;
-        }
-    }
+    await ensureWorker(
+        ns,
+        WORKER.weaken,
+        WORKER_CODE.weaken
+    );
 
 
     // ============================================================
@@ -174,7 +250,7 @@ export async function main(ns) {
 
 
     // ============================================================
-    // WINDOW
+    // UI
     // ============================================================
 
     ns.ui.openTail();
@@ -199,29 +275,50 @@ export async function main(ns) {
 
     let totalBatchesLaunched = 0;
 
+    let totalRooted = 0;
+
+    let lastBatchCount = 0;
+
     let lastAction =
         "Initializing";
 
-    let lastTarget =
-        "";
-
-    let lastBatchCount =
-        0;
-
 
     // ============================================================
-    // MAIN CONTROL LOOP
+    // MAIN LOOP
     // ============================================================
 
     while (true) {
 
         cycleNumber++;
 
-        const servers =
-            scanNetwork(ns);
 
         // ========================================================
-        // COPY WORKERS
+        // NETWORK DISCOVERY
+        // ========================================================
+
+        const servers =
+            scanNetwork(
+                ns
+            );
+
+
+        // ========================================================
+        // ROOT EVERYTHING POSSIBLE
+        // ========================================================
+
+        const newlyRooted =
+            rootAvailableServers(
+                ns,
+                servers
+            );
+
+
+        totalRooted +=
+            newlyRooted;
+
+
+        // ========================================================
+        // DISTRIBUTE WORKERS
         // ========================================================
 
         await distributeWorkers(
@@ -232,14 +329,15 @@ export async function main(ns) {
 
 
         // ========================================================
-        // WORKER HOSTS
+        // WORKER POOL
         // ========================================================
 
         const workerHosts =
             getWorkerHosts(
                 ns,
                 servers,
-                CONFIG.homeReserveRam
+                CONFIG.homeReserveRam,
+                WORKER
             );
 
 
@@ -254,6 +352,9 @@ export async function main(ns) {
         // ========================================================
 
         let target;
+
+        let targetAnalysis =
+            null;
 
 
         if (
@@ -270,44 +371,74 @@ export async function main(ns) {
             if (!target) {
 
                 ns.tprint(
-                    `Invalid target: ${CONFIG.targetOverride}`
+                    `ERROR: Invalid target: ${CONFIG.targetOverride}`
                 );
 
                 return;
             }
+
+
+            targetAnalysis =
+                analyzeTarget(
+                    ns,
+                    target,
+                    RAM,
+                    CONFIG
+                );
         }
         else {
 
-            target =
+            const selection =
                 selectBestTarget(
                     ns,
                     servers,
-                    CONFIG.targetHackFraction
+                    RAM,
+                    CONFIG
                 );
+
+
+            target =
+                selection?.server ??
+                null;
+
+
+            targetAnalysis =
+                selection ??
+                null;
         }
 
+
+        // ========================================================
+        // NO TARGET
+        // ========================================================
 
         if (!target) {
 
             lastAction =
                 "No viable target found";
 
-            renderDashboard(
-                ns,
-                CONFIG,
-                COLOR,
-                RAM,
-                {
-                    target: null,
-                    cycleNumber,
-                    totalBatchesLaunched,
-                    lastAction,
-                    lastBatchCount,
-                    networkStats,
-                    workerHosts
-                },
-                lastDisplay
-            );
+
+            lastDisplay =
+                renderDashboard(
+                    ns,
+                    CONFIG,
+                    COLOR,
+                    RAM,
+                    {
+                        target: null,
+                        targetAnalysis: null,
+                        cycleNumber,
+                        totalBatchesLaunched,
+                        lastAction,
+                        lastBatchCount,
+                        networkStats,
+                        workerHosts,
+                        newlyRooted,
+                        totalRooted
+                    },
+                    lastDisplay
+                );
+
 
             await ns.sleep(
                 CONFIG.refreshMs
@@ -315,10 +446,6 @@ export async function main(ns) {
 
             continue;
         }
-
-
-        lastTarget =
-            target;
 
 
         // ========================================================
@@ -349,7 +476,6 @@ export async function main(ns) {
                 await prepSecurity(
                     ns,
                     target,
-                    servers,
                     workerHosts,
                     RAM,
                     CONFIG,
@@ -357,23 +483,27 @@ export async function main(ns) {
                 );
 
 
-            renderDashboard(
-                ns,
-                CONFIG,
-                COLOR,
-                RAM,
-                {
-                    target,
-                    cycleNumber,
-                    totalBatchesLaunched,
-                    lastAction,
-                    lastBatchCount: 0,
-                    networkStats,
-                    workerHosts,
-                    plan: result
-                },
-                lastDisplay
-            );
+            lastDisplay =
+                renderDashboard(
+                    ns,
+                    CONFIG,
+                    COLOR,
+                    RAM,
+                    {
+                        target,
+                        targetAnalysis,
+                        cycleNumber,
+                        totalBatchesLaunched,
+                        lastAction,
+                        lastBatchCount: 0,
+                        networkStats,
+                        workerHosts,
+                        newlyRooted,
+                        totalRooted,
+                        plan: result
+                    },
+                    lastDisplay
+                );
 
 
             if (
@@ -416,31 +546,33 @@ export async function main(ns) {
                 await prepMoney(
                     ns,
                     target,
-                    servers,
                     workerHosts,
-                    RAM,
                     CONFIG,
                     WORKER
                 );
 
 
-            renderDashboard(
-                ns,
-                CONFIG,
-                COLOR,
-                RAM,
-                {
-                    target,
-                    cycleNumber,
-                    totalBatchesLaunched,
-                    lastAction,
-                    lastBatchCount: 0,
-                    networkStats,
-                    workerHosts,
-                    plan: result
-                },
-                lastDisplay
-            );
+            lastDisplay =
+                renderDashboard(
+                    ns,
+                    CONFIG,
+                    COLOR,
+                    RAM,
+                    {
+                        target,
+                        targetAnalysis,
+                        cycleNumber,
+                        totalBatchesLaunched,
+                        lastAction,
+                        lastBatchCount: 0,
+                        networkStats,
+                        workerHosts,
+                        newlyRooted,
+                        totalRooted,
+                        plan: result
+                    },
+                    lastDisplay
+                );
 
 
             if (
@@ -467,7 +599,7 @@ export async function main(ns) {
 
 
         // ========================================================
-        // TARGET READY
+        // CALCULATE CURRENT HWGW BATCH
         // ========================================================
 
         const batchPlan =
@@ -494,7 +626,23 @@ export async function main(ns) {
 
 
         // ========================================================
-        // DETERMINE SAFE BATCH COUNT
+        // REFRESH TARGET ANALYSIS
+        //
+        // Target should now be prepared, so this gives us the
+        // most useful efficiency measurement.
+        // ========================================================
+
+        targetAnalysis =
+            analyzeTarget(
+                ns,
+                target,
+                RAM,
+                CONFIG
+            );
+
+
+        // ========================================================
+        // SAFE BATCH COUNT
         // ========================================================
 
         const safeBatchLimit =
@@ -515,7 +663,8 @@ export async function main(ns) {
             getWorkerHosts(
                 ns,
                 servers,
-                CONFIG.homeReserveRam
+                CONFIG.homeReserveRam,
+                WORKER
             );
 
 
@@ -533,7 +682,7 @@ export async function main(ns) {
 
 
         // ========================================================
-        // NOT ENOUGH RAM
+        // WAITING FOR RAM
         // ========================================================
 
         if (
@@ -544,23 +693,27 @@ export async function main(ns) {
                 "READY // Waiting for RAM";
 
 
-            renderDashboard(
-                ns,
-                CONFIG,
-                COLOR,
-                RAM,
-                {
-                    target,
-                    cycleNumber,
-                    totalBatchesLaunched,
-                    lastAction,
-                    lastBatchCount,
-                    networkStats,
-                    workerHosts,
-                    batchPlan
-                },
-                lastDisplay
-            );
+            lastDisplay =
+                renderDashboard(
+                    ns,
+                    CONFIG,
+                    COLOR,
+                    RAM,
+                    {
+                        target,
+                        targetAnalysis,
+                        cycleNumber,
+                        totalBatchesLaunched,
+                        lastAction,
+                        lastBatchCount,
+                        networkStats,
+                        workerHosts,
+                        newlyRooted,
+                        totalRooted,
+                        batchPlan
+                    },
+                    lastDisplay
+                );
 
 
             await ns.sleep(
@@ -572,7 +725,7 @@ export async function main(ns) {
 
 
         // ========================================================
-        // BUILD SHOTGUN BATCH SET
+        // BUILD STAGGERED HWGW PIPELINE
         // ========================================================
 
         const actions =
@@ -589,7 +742,8 @@ export async function main(ns) {
             getWorkerHosts(
                 ns,
                 servers,
-                CONFIG.homeReserveRam
+                CONFIG.homeReserveRam,
+                WORKER
             );
 
 
@@ -600,7 +754,9 @@ export async function main(ns) {
             );
 
 
-        if (!placement.success) {
+        if (
+            !placement.success
+        ) {
 
             lastAction =
                 "Allocation failed";
@@ -626,24 +782,28 @@ export async function main(ns) {
                 `DRY RUN // ${batchCount} batches`;
 
 
-            renderDashboard(
-                ns,
-                CONFIG,
-                COLOR,
-                RAM,
-                {
-                    target,
-                    cycleNumber,
-                    totalBatchesLaunched,
-                    lastAction,
-                    lastBatchCount,
-                    networkStats,
-                    workerHosts,
-                    batchPlan,
-                    placement
-                },
-                lastDisplay
-            );
+            lastDisplay =
+                renderDashboard(
+                    ns,
+                    CONFIG,
+                    COLOR,
+                    RAM,
+                    {
+                        target,
+                        targetAnalysis,
+                        cycleNumber,
+                        totalBatchesLaunched,
+                        lastAction,
+                        lastBatchCount,
+                        networkStats,
+                        workerHosts,
+                        newlyRooted,
+                        totalRooted,
+                        batchPlan,
+                        placement
+                    },
+                    lastDisplay
+                );
 
 
             await ns.sleep(
@@ -672,13 +832,15 @@ export async function main(ns) {
             lastAction =
                 "Batch launch failed";
 
-            // Stop anything from this partial launch.
+
             for (
                 const pid
                 of launchResult.startedPids
             ) {
 
-                ns.kill(pid);
+                ns.kill(
+                    pid
+                );
             }
 
 
@@ -699,43 +861,52 @@ export async function main(ns) {
 
 
         // ========================================================
-        // DISPLAY ACTIVE BATCH
+        // ACTIVE DISPLAY
         // ========================================================
 
         const updatedHosts =
             getWorkerHosts(
                 ns,
                 servers,
-                CONFIG.homeReserveRam
+                CONFIG.homeReserveRam,
+                WORKER
             );
 
 
-        renderDashboard(
-            ns,
-            CONFIG,
-            COLOR,
-            RAM,
-            {
-                target,
-                cycleNumber,
-                totalBatchesLaunched,
-                lastAction,
-                lastBatchCount,
-                networkStats:
-                    getNetworkStats(
-                        updatedHosts
-                    ),
-                workerHosts:
-                    updatedHosts,
-                batchPlan,
-                placement
-            },
-            lastDisplay
-        );
+        lastDisplay =
+            renderDashboard(
+                ns,
+                CONFIG,
+                COLOR,
+                RAM,
+                {
+                    target,
+                    targetAnalysis,
+                    cycleNumber,
+                    totalBatchesLaunched,
+                    lastAction,
+                    lastBatchCount,
+
+                    networkStats:
+                        getNetworkStats(
+                            updatedHosts
+                        ),
+
+                    workerHosts:
+                        updatedHosts,
+
+                    newlyRooted,
+                    totalRooted,
+
+                    batchPlan,
+                    placement
+                },
+                lastDisplay
+            );
 
 
         // ========================================================
-        // WAIT FOR BATCHES
+        // WAIT UNTIL CURRENT PIPELINE FINISHES
         // ========================================================
 
         await waitForWorkers(
@@ -748,19 +919,125 @@ export async function main(ns) {
 
 
 // =================================================================
-// SELECT BEST TARGET
+// CREATE / REPAIR WORKER
 // =================================================================
 
-function selectBestTarget(
+async function ensureWorker(
     ns,
-    servers,
-    targetHackFraction
+    filename,
+    contents
 ) {
 
-    const hackingLevel =
-        ns.getHackingLevel();
+    let existing = "";
 
-    const candidates = [];
+
+    if (
+        ns.fileExists(
+            filename,
+            "home"
+        )
+    ) {
+
+        existing =
+            ns.read(
+                filename
+            );
+    }
+
+
+    if (
+        existing !==
+        contents
+    ) {
+
+        await ns.write(
+            filename,
+            contents,
+            "w"
+        );
+    }
+}
+
+
+// =================================================================
+// ROOT AVAILABLE SERVERS
+// =================================================================
+
+function rootAvailableServers(
+    ns,
+    servers
+) {
+
+    const programs = [
+
+        {
+            file:
+                "BruteSSH.exe",
+
+            open:
+                server =>
+                    ns.brutessh(
+                        server
+                    )
+        },
+
+        {
+            file:
+                "FTPCrack.exe",
+
+            open:
+                server =>
+                    ns.ftpcrack(
+                        server
+                    )
+        },
+
+        {
+            file:
+                "relaySMTP.exe",
+
+            open:
+                server =>
+                    ns.relaysmtp(
+                        server
+                    )
+        },
+
+        {
+            file:
+                "HTTPWorm.exe",
+
+            open:
+                server =>
+                    ns.httpworm(
+                        server
+                    )
+        },
+
+        {
+            file:
+                "SQLInject.exe",
+
+            open:
+                server =>
+                    ns.sqlinject(
+                        server
+                    )
+        }
+    ];
+
+
+    const availablePrograms =
+        programs.filter(
+            program =>
+                ns.fileExists(
+                    program.file,
+                    "home"
+                )
+        );
+
+
+    let rooted = 0;
 
 
     for (
@@ -775,106 +1052,112 @@ function selectBestTarget(
         }
 
 
-        const data =
-            ns.getServer(
+        if (
+            ns.hasRootAccess(
+                server
+            )
+        ) {
+            continue;
+        }
+
+
+        const portsRequired =
+            ns.getServerNumPortsRequired(
                 server
             );
 
 
         if (
-            !data.hasAdminRights
-        ) {
-            continue;
-        }
-
-
-        const maxMoney =
-            data.moneyMax ?? 0;
-
-
-        if (
-            maxMoney <= 0
-        ) {
-            continue;
-        }
-
-
-        if (
-            (
-                data.requiredHackingSkill ??
-                0
-            ) >
-            hackingLevel
+            availablePrograms.length <
+            portsRequired
         ) {
 
             continue;
         }
 
 
-        const hackFraction =
-            ns.hackAnalyze(
+        for (
+            const program
+            of availablePrograms
+        ) {
+
+            program.open(
                 server
             );
+        }
 
 
-        const chance =
-            ns.hackAnalyzeChance(
-                server
-            );
-
-
-        const time =
-            ns.getHackTime(
+        const success =
+            ns.nuke(
                 server
             );
 
 
         if (
-            hackFraction <= 0 ||
-            chance <= 0 ||
-            time <= 0
+            success &&
+            ns.hasRootAccess(
+                server
+            )
         ) {
 
+            rooted++;
+        }
+    }
+
+
+    return rooted;
+}
+
+
+// =================================================================
+// SELECT BEST TARGET
+//
+// NEW:
+// Instead of:
+//
+//     expected money / hack time
+//
+// we evaluate the entire HWGW batch:
+//
+//     expected money
+//     ------------------------
+//     batch RAM * batch seconds
+//
+// This gives us expected dollars per RAM-second.
+// =================================================================
+
+function selectBestTarget(
+    ns,
+    servers,
+    RAM,
+    CONFIG
+) {
+
+    const candidates = [];
+
+
+    for (
+        const server
+        of servers
+    ) {
+
+        const analysis =
+            analyzeTarget(
+                ns,
+                server,
+                RAM,
+                CONFIG
+            );
+
+
+        if (!analysis) {
             continue;
         }
 
 
-        const threads =
-            Math.max(
-                1,
-                Math.floor(
-                    targetHackFraction /
-                    hackFraction
-                )
-            );
-
-
-        const actualFraction =
-            Math.min(
-                0.90,
-                hackFraction *
-                threads
-            );
-
-
-        const expectedMoney =
-            maxMoney *
-            actualFraction *
-            chance;
-
-
-        const score =
-            expectedMoney /
-            (
-                time /
-                1000
-            );
-
-
-        candidates.push({
-            server,
-            score
-        });
+        candidates.push(
+            analysis
+        );
     }
 
 
@@ -886,9 +1169,224 @@ function selectBestTarget(
 
 
     return (
-        candidates[0]?.server ??
+        candidates[0] ??
         null
     );
+}
+
+
+// =================================================================
+// ANALYZE TARGET PROFITABILITY
+// =================================================================
+
+function analyzeTarget(
+    ns,
+    server,
+    RAM,
+    CONFIG
+) {
+
+    if (
+        server === "home"
+    ) {
+
+        return null;
+    }
+
+
+    if (
+        !ns.serverExists(
+            server
+        )
+    ) {
+
+        return null;
+    }
+
+
+    const data =
+        ns.getServer(
+            server
+        );
+
+
+    // Must already have root.
+
+    if (
+        !data.hasAdminRights
+    ) {
+
+        return null;
+    }
+
+
+    const maxMoney =
+        data.moneyMax ??
+        0;
+
+
+    if (
+        maxMoney <= 0
+    ) {
+
+        return null;
+    }
+
+
+    // Player must actually be able to hack it.
+
+    if (
+        (
+            data.requiredHackingSkill ??
+            0
+        ) >
+        ns.getHackingLevel()
+    ) {
+
+        return null;
+    }
+
+
+    // ============================================================
+    // CALCULATE COMPLETE HWGW BATCH
+    // ============================================================
+
+    const batch =
+        calculateBatch(
+            ns,
+            server,
+            RAM,
+            CONFIG
+        );
+
+
+    if (!batch) {
+
+        return null;
+    }
+
+
+    const hackChance =
+        ns.hackAnalyzeChance(
+            server
+        );
+
+
+    if (
+        !Number.isFinite(
+            hackChance
+        ) ||
+        hackChance <= 0
+    ) {
+
+        return null;
+    }
+
+
+    // ============================================================
+    // EXPECTED MONEY
+    // ============================================================
+
+    const expectedMoney =
+        maxMoney *
+        batch.actualHackFraction *
+        hackChance;
+
+
+    // ============================================================
+    // BATCH DURATION
+    //
+    // Weak2 is intentionally the final operation.
+    // ============================================================
+
+    const batchDurationMs =
+        batch.weakenTime +
+        (
+            3 *
+            CONFIG.gapMs
+        );
+
+
+    const batchDurationSeconds =
+        Math.max(
+            0.001,
+            batchDurationMs /
+            1000
+        );
+
+
+    // ============================================================
+    // RAM-SECONDS
+    // ============================================================
+
+    const ramSeconds =
+        batch.batchRam *
+        batchDurationSeconds;
+
+
+    if (
+        !Number.isFinite(
+            ramSeconds
+        ) ||
+        ramSeconds <= 0
+    ) {
+
+        return null;
+    }
+
+
+    // ============================================================
+    // PRIMARY SCORE
+    //
+    // Expected dollars produced for one GB-second of RAM.
+    // ============================================================
+
+    const score =
+        expectedMoney /
+        ramSeconds;
+
+
+    // Useful secondary statistics.
+
+    const expectedMoneyPerSecond =
+        expectedMoney /
+        batchDurationSeconds;
+
+
+    return {
+
+        server,
+
+        score,
+
+        expectedMoney,
+
+        expectedMoneyPerSecond,
+
+        ramSeconds,
+
+        batchRam:
+            batch.batchRam,
+
+        batchDurationMs,
+
+        hackChance,
+
+        actualHackFraction:
+            batch.actualHackFraction,
+
+        hackThreads:
+            batch.hackThreads,
+
+        growThreads:
+            batch.growThreads,
+
+        weaken1Threads:
+            batch.weaken1Threads,
+
+        weaken2Threads:
+            batch.weaken2Threads
+    };
 }
 
 
@@ -902,7 +1400,9 @@ function validateTarget(
 ) {
 
     if (
-        !ns.serverExists(server)
+        !ns.serverExists(
+            server
+        )
     ) {
 
         return null;
@@ -910,7 +1410,9 @@ function validateTarget(
 
 
     if (
-        !ns.hasRootAccess(server)
+        !ns.hasRootAccess(
+            server
+        )
     ) {
 
         return null;
@@ -918,8 +1420,9 @@ function validateTarget(
 
 
     if (
-        ns.getServerMaxMoney(server) <=
-        0
+        ns.getServerMaxMoney(
+            server
+        ) <= 0
     ) {
 
         return null;
@@ -982,7 +1485,8 @@ function getTargetState(
 
         moneyPercent:
             maxMoney > 0
-                ? money / maxMoney
+                ? money /
+                  maxMoney
                 : 0,
 
         security,
@@ -1017,6 +1521,9 @@ function calculateBatch(
 
 
     if (
+        !Number.isFinite(
+            hackFractionPerThread
+        ) ||
         hackFractionPerThread <= 0
     ) {
 
@@ -1040,7 +1547,8 @@ function calculateBatch(
 
 
     if (
-        actualHackFraction >= 0.90
+        actualHackFraction >=
+        0.90
     ) {
 
         hackThreads =
@@ -1059,6 +1567,15 @@ function calculateBatch(
     }
 
 
+    // Never allow an invalid >= 100% batch.
+
+    actualHackFraction =
+        Math.min(
+            0.90,
+            actualHackFraction
+        );
+
+
     const remainingMoneyFraction =
         Math.max(
             0.01,
@@ -1072,16 +1589,41 @@ function calculateBatch(
         remainingMoneyFraction;
 
 
-    const growThreads =
-        Math.max(
-            1,
+    let growThreads;
+
+
+    try {
+
+        growThreads =
             Math.ceil(
                 ns.growthAnalyze(
                     target,
                     growMultiplier,
                     1
                 )
-            )
+            );
+
+    }
+    catch {
+
+        return null;
+    }
+
+
+    if (
+        !Number.isFinite(
+            growThreads
+        )
+    ) {
+
+        return null;
+    }
+
+
+    growThreads =
+        Math.max(
+            1,
+            growThreads
         );
 
 
@@ -1090,6 +1632,17 @@ function calculateBatch(
             1,
             1
         );
+
+
+    if (
+        !Number.isFinite(
+            weakenPerThread
+        ) ||
+        weakenPerThread <= 0
+    ) {
+
+        return null;
+    }
 
 
     const hackSecurity =
@@ -1145,6 +1698,19 @@ function calculateBatch(
         );
 
 
+    if (
+        !Number.isFinite(hackTime) ||
+        !Number.isFinite(growTime) ||
+        !Number.isFinite(weakenTime) ||
+        hackTime <= 0 ||
+        growTime <= 0 ||
+        weakenTime <= 0
+    ) {
+
+        return null;
+    }
+
+
     const batchRam =
         (
             hackThreads *
@@ -1189,7 +1755,7 @@ function calculateBatch(
 
 
 // =================================================================
-// SAFE NUMBER OF SIMULTANEOUS HACKS
+// SAFE BATCH COUNT
 // =================================================================
 
 function calculateSafeBatchLimit(
@@ -1213,12 +1779,6 @@ function calculateSafeBatchLimit(
         return 1;
     }
 
-
-    // Remaining money after N hacks:
-    //
-    // (1 - hackFraction)^N
-    //
-    // We limit the aggregate temporary drain.
 
     const minimumRemaining =
         1 -
@@ -1245,7 +1805,7 @@ function calculateSafeBatchLimit(
 
 
 // =================================================================
-// BUILD BATCH ACTIONS
+// BUILD STAGGERED HWGW BATCHES
 // =================================================================
 
 function buildBatchActions(
@@ -1259,55 +1819,62 @@ function buildBatchActions(
     const actions = [];
 
 
-    // -------------------------------------------------------------
-    // FINISH ORDER
-    //
-    // Hack    = W
-    // Weak 1  = W + gap
-    // Grow    = W + 2gap
-    // Weak 2  = W + 3gap
-    // -------------------------------------------------------------
+    const launchId =
+        Date.now();
 
-    const hackDelay =
-        Math.max(
-            0,
-            batch.weakenTime -
-            batch.hackTime
-        );
-
-
-    const weaken1Delay =
-        CONFIG.gapMs;
-
-
-    const growDelay =
-        Math.max(
-            0,
-            (
-                batch.weakenTime +
-                (
-                    2 *
-                    CONFIG.gapMs
-                )
-            ) -
-            batch.growTime
-        );
-
-
-    const weaken2Delay =
-        3 *
-        CONFIG.gapMs;
-
-
-    // -------------------------------------------------------------
-    // HACKS FIRST
-    // -------------------------------------------------------------
 
     for (
         let i = 0;
         i < batchCount;
         i++
     ) {
+
+        const batchOffset =
+            i *
+            CONFIG.gapMs *
+            4;
+
+
+        const batchId =
+            `B${i}-${launchId}`;
+
+
+        const hackDelay =
+            Math.max(
+                0,
+                batch.weakenTime -
+                batch.hackTime +
+                batchOffset
+            );
+
+
+        const weaken1Delay =
+            CONFIG.gapMs +
+            batchOffset;
+
+
+        const growDelay =
+            Math.max(
+                0,
+                (
+                    batch.weakenTime +
+                    (
+                        2 *
+                        CONFIG.gapMs
+                    )
+                ) -
+                batch.growTime +
+                batchOffset
+            );
+
+
+        const weaken2Delay =
+            (
+                3 *
+                CONFIG.gapMs
+            ) +
+            batchOffset;
+
 
         actions.push({
 
@@ -1317,28 +1884,14 @@ function buildBatchActions(
             threads:
                 batch.hackThreads,
 
-            ramPerThread:
-                0,
-
             args: [
                 target,
                 hackDelay,
-                `B${i}`,
+                batchId,
                 "H"
             ]
         });
-    }
 
-
-    // -------------------------------------------------------------
-    // WEAKEN 1
-    // -------------------------------------------------------------
-
-    for (
-        let i = 0;
-        i < batchCount;
-        i++
-    ) {
 
         actions.push({
 
@@ -1348,28 +1901,14 @@ function buildBatchActions(
             threads:
                 batch.weaken1Threads,
 
-            ramPerThread:
-                0,
-
             args: [
                 target,
                 weaken1Delay,
-                `B${i}`,
+                batchId,
                 "W1"
             ]
         });
-    }
 
-
-    // -------------------------------------------------------------
-    // GROW
-    // -------------------------------------------------------------
-
-    for (
-        let i = 0;
-        i < batchCount;
-        i++
-    ) {
 
         actions.push({
 
@@ -1379,28 +1918,14 @@ function buildBatchActions(
             threads:
                 batch.growThreads,
 
-            ramPerThread:
-                0,
-
             args: [
                 target,
                 growDelay,
-                `B${i}`,
+                batchId,
                 "G"
             ]
         });
-    }
 
-
-    // -------------------------------------------------------------
-    // WEAKEN 2
-    // -------------------------------------------------------------
-
-    for (
-        let i = 0;
-        i < batchCount;
-        i++
-    ) {
 
         actions.push({
 
@@ -1410,13 +1935,10 @@ function buildBatchActions(
             threads:
                 batch.weaken2Threads,
 
-            ramPerThread:
-                0,
-
             args: [
                 target,
                 weaken2Delay,
-                `B${i}`,
+                batchId,
                 "W2"
             ]
         });
@@ -1428,7 +1950,7 @@ function buildBatchActions(
 
 
 // =================================================================
-// FIND MAXIMUM BATCHES THAT ACTUALLY FIT
+// FIND MAXIMUM NUMBER OF BATCHES THAT FIT
 // =================================================================
 
 function findMaximumBatchCount(
@@ -1439,7 +1961,9 @@ function findMaximumBatchCount(
 ) {
 
     let low = 0;
-    let high = maximum;
+
+    let high =
+        maximum;
 
 
     while (
@@ -1464,15 +1988,17 @@ function findMaximumBatchCount(
             );
 
 
-        const test =
+        const result =
             allocateActions(
-                cloneHosts(hosts),
+                cloneHosts(
+                    hosts
+                ),
                 actions
             );
 
 
         if (
-            test.success
+            result.success
         ) {
 
             low =
@@ -1491,7 +2017,7 @@ function findMaximumBatchCount(
 
 
 // =================================================================
-// SIMPLE ACTIONS USED ONLY FOR RAM FIT TEST
+// SIMPLE BATCH ACTIONS FOR RAM TESTING
 // =================================================================
 
 function buildSimpleBatchActions(
@@ -1510,6 +2036,7 @@ function buildSimpleBatchActions(
     ) {
 
         actions.push({
+
             script:
                 WORKER.hack,
 
@@ -1518,16 +2045,10 @@ function buildSimpleBatchActions(
 
             args: []
         });
-    }
 
-
-    for (
-        let i = 0;
-        i < batchCount;
-        i++
-    ) {
 
         actions.push({
+
             script:
                 WORKER.weaken,
 
@@ -1536,16 +2057,10 @@ function buildSimpleBatchActions(
 
             args: []
         });
-    }
 
-
-    for (
-        let i = 0;
-        i < batchCount;
-        i++
-    ) {
 
         actions.push({
+
             script:
                 WORKER.grow,
 
@@ -1554,16 +2069,10 @@ function buildSimpleBatchActions(
 
             args: []
         });
-    }
 
-
-    for (
-        let i = 0;
-        i < batchCount;
-        i++
-    ) {
 
         actions.push({
+
             script:
                 WORKER.weaken,
 
@@ -1580,13 +2089,12 @@ function buildSimpleBatchActions(
 
 
 // =================================================================
-// PREP SECURITY
+// SECURITY PREP
 // =================================================================
 
 async function prepSecurity(
     ns,
     target,
-    servers,
     hosts,
     RAM,
     CONFIG,
@@ -1633,11 +2141,17 @@ async function prepSecurity(
     ) {
 
         return {
+
             launched: false,
+
             description:
                 "No RAM available for weaken prep"
         };
     }
+
+
+    const prepId =
+        `PREP-W-${Date.now()}`;
 
 
     const actions = [{
@@ -1650,7 +2164,7 @@ async function prepSecurity(
         args: [
             target,
             0,
-            `PREP-${Date.now()}`,
+            prepId,
             "PREP-W"
         ]
     }];
@@ -1658,7 +2172,9 @@ async function prepSecurity(
 
     const placement =
         allocateActions(
-            cloneHosts(hosts),
+            cloneHosts(
+                hosts
+            ),
             actions
         );
 
@@ -1668,7 +2184,9 @@ async function prepSecurity(
     ) {
 
         return {
+
             launched: false,
+
             description:
                 "Unable to allocate weaken prep"
         };
@@ -1680,7 +2198,9 @@ async function prepSecurity(
     ) {
 
         return {
+
             launched: false,
+
             description:
                 `Would launch ${threads} weaken threads`
         };
@@ -1695,6 +2215,7 @@ async function prepSecurity(
 
 
     return {
+
         launched:
             result.success,
 
@@ -1705,15 +2226,13 @@ async function prepSecurity(
 
 
 // =================================================================
-// PREP MONEY
+// MONEY PREP
 // =================================================================
 
 async function prepMoney(
     ns,
     target,
-    servers,
     hosts,
-    RAM,
     CONFIG,
     WORKER
 ) {
@@ -1737,14 +2256,47 @@ async function prepMoney(
         currentMoney;
 
 
-    let requiredGrowThreads =
-        Math.ceil(
-            ns.growthAnalyze(
-                target,
-                multiplier,
-                1
-            )
-        );
+    let requiredGrowThreads;
+
+
+    try {
+
+        requiredGrowThreads =
+            Math.ceil(
+                ns.growthAnalyze(
+                    target,
+                    multiplier,
+                    1
+                )
+            );
+
+    }
+    catch {
+
+        return {
+
+            launched: false,
+
+            description:
+                "Unable to calculate grow prep"
+        };
+    }
+
+
+    if (
+        !Number.isFinite(
+            requiredGrowThreads
+        )
+    ) {
+
+        return {
+
+            launched: false,
+
+            description:
+                "Unable to calculate grow prep"
+        };
+    }
 
 
     requiredGrowThreads =
@@ -1754,16 +2306,10 @@ async function prepMoney(
         );
 
 
-    // Find largest paired Grow + Weaken operation
-    // that fits current network RAM.
-
     let low = 0;
+
     let high =
         requiredGrowThreads;
-
-
-    let bestActions =
-        null;
 
 
     while (
@@ -1780,85 +2326,31 @@ async function prepMoney(
             );
 
 
-        const growSecurity =
-            ns.growthAnalyzeSecurity(
-                mid,
+        const actions =
+            buildPrepMoneyActions(
+                ns,
                 target,
-                1
+                mid,
+                CONFIG,
+                WORKER
             );
 
 
-        const weakenThreads =
-            Math.max(
-                1,
-                Math.ceil(
-                    growSecurity /
-                    ns.weakenAnalyze(
-                        1,
-                        1
-                    )
-                )
-            );
-
-
-        const growDelay =
-            Math.max(
-                0,
-                ns.getWeakenTime(target) -
-                ns.getGrowTime(target)
-            );
-
-
-        const actions = [
-
-            {
-                script:
-                    WORKER.grow,
-
-                threads:
-                    mid,
-
-                args: [
-                    target,
-                    growDelay,
-                    `PREP-${Date.now()}`,
-                    "PREP-G"
-                ]
-            },
-
-            {
-                script:
-                    WORKER.weaken,
-
-                threads:
-                    weakenThreads,
-
-                args: [
-                    target,
-                    CONFIG.gapMs,
-                    `PREP-${Date.now()}`,
-                    "PREP-W"
-                ]
-            }
-        ];
-
-
-        const test =
+        const result =
             allocateActions(
-                cloneHosts(hosts),
+                cloneHosts(
+                    hosts
+                ),
                 actions
             );
 
 
         if (
-            test.success
+            result.success
         ) {
 
             low =
                 mid;
-
-            bestActions =
-                actions;
         }
         else {
 
@@ -1873,81 +2365,30 @@ async function prepMoney(
     ) {
 
         return {
+
             launched: false,
+
             description:
                 "No RAM available for grow prep"
         };
     }
 
 
-    if (
-        !bestActions ||
-        bestActions[0].threads !== low
-    ) {
-
-        const growSecurity =
-            ns.growthAnalyzeSecurity(
-                low,
-                target,
-                1
-            );
-
-
-        const weakenThreads =
-            Math.max(
-                1,
-                Math.ceil(
-                    growSecurity /
-                    ns.weakenAnalyze(
-                        1,
-                        1
-                    )
-                )
-            );
-
-
-        bestActions = [
-
-            {
-                script:
-                    WORKER.grow,
-
-                threads:
-                    low,
-
-                args: [
-                    target,
-                    Math.max(
-                        0,
-                        ns.getWeakenTime(target) -
-                        ns.getGrowTime(target)
-                    ),
-                    `PREP-${Date.now()}`,
-                    "PREP-G"
-                ]
-            },
-
-            {
-                script:
-                    WORKER.weaken,
-
-                threads:
-                    weakenThreads,
-
-                args: [
-                    target,
-                    CONFIG.gapMs,
-                    `PREP-${Date.now()}`,
-                    "PREP-W"
-                ]
-            }
-        ];
-    }
+    const bestActions =
+        buildPrepMoneyActions(
+            ns,
+            target,
+            low,
+            CONFIG,
+            WORKER
+        );
 
 
     const placement =
         allocateActions(
-            cloneHosts(hosts),
+            cloneHosts(
+                hosts
+            ),
             bestActions
         );
 
@@ -1957,7 +2398,9 @@ async function prepMoney(
     ) {
 
         return {
+
             launched: false,
+
             description:
                 "Unable to allocate grow prep"
         };
@@ -1969,7 +2412,9 @@ async function prepMoney(
     ) {
 
         return {
+
             launched: false,
+
             description:
                 `Would launch ${low} grow threads`
         };
@@ -1984,6 +2429,7 @@ async function prepMoney(
 
 
     return {
+
         launched:
             result.success,
 
@@ -1994,7 +2440,91 @@ async function prepMoney(
 
 
 // =================================================================
-// ALLOCATE ACTIONS TO WORKER HOSTS
+// BUILD MONEY PREP ACTIONS
+// =================================================================
+
+function buildPrepMoneyActions(
+    ns,
+    target,
+    growThreads,
+    CONFIG,
+    WORKER
+) {
+
+    const growSecurity =
+        ns.growthAnalyzeSecurity(
+            growThreads,
+            target,
+            1
+        );
+
+
+    const weakenThreads =
+        Math.max(
+            1,
+            Math.ceil(
+                growSecurity /
+                ns.weakenAnalyze(
+                    1,
+                    1
+                )
+            )
+        );
+
+
+    const growDelay =
+        Math.max(
+            0,
+            ns.getWeakenTime(
+                target
+            ) -
+            ns.getGrowTime(
+                target
+            )
+        );
+
+
+    const prepId =
+        `PREP-G-${Date.now()}`;
+
+
+    return [
+
+        {
+            script:
+                WORKER.grow,
+
+            threads:
+                growThreads,
+
+            args: [
+                target,
+                growDelay,
+                prepId,
+                "PREP-G"
+            ]
+        },
+
+        {
+            script:
+                WORKER.weaken,
+
+            threads:
+                weakenThreads,
+
+            args: [
+                target,
+                CONFIG.gapMs,
+                prepId,
+                "PREP-W"
+            ]
+        }
+    ];
+}
+
+
+// =================================================================
+// ALLOCATE ACTIONS
 // =================================================================
 
 function allocateActions(
@@ -2004,22 +2534,6 @@ function allocateActions(
 
     const placements = [];
 
-
-    const workerRam = {
-
-        "bb-hack-worker.js":
-            null,
-
-        "bb-grow-worker.js":
-            null,
-
-        "bb-weaken-worker.js":
-            null
-    };
-
-
-    // Script RAM is attached dynamically from the
-    // host's ramMap property.
 
     for (
         const action
@@ -2110,7 +2624,9 @@ function allocateActions(
         ) {
 
             return {
+
                 success: false,
+
                 placements: []
             };
         }
@@ -2118,7 +2634,9 @@ function allocateActions(
 
 
     return {
+
         success: true,
+
         placements
     };
 }
@@ -2155,7 +2673,9 @@ function launchPlacements(
         ) {
 
             return {
+
                 success: false,
+
                 startedPids
             };
         }
@@ -2168,7 +2688,9 @@ function launchPlacements(
 
 
     return {
+
         success: true,
+
         startedPids
     };
 }
@@ -2181,17 +2703,17 @@ function launchPlacements(
 function getWorkerHosts(
     ns,
     servers,
-    homeReserveRam
+    homeReserveRam,
+    WORKER
 ) {
 
     const hosts = [];
 
 
-    const scripts = [
-        "bb-hack-worker.js",
-        "bb-grow-worker.js",
-        "bb-weaken-worker.js"
-    ];
+    const scripts =
+        Object.values(
+            WORKER
+        );
 
 
     for (
@@ -2200,7 +2722,9 @@ function getWorkerHosts(
     ) {
 
         if (
-            !ns.hasRootAccess(server)
+            !ns.hasRootAccess(
+                server
+            )
         ) {
 
             continue;
@@ -2271,8 +2795,6 @@ function getWorkerHosts(
     }
 
 
-    // Larger free hosts first reduces fragmentation.
-
     hosts.sort(
         (a, b) =>
             b.freeRam -
@@ -2285,7 +2807,7 @@ function getWorkerHosts(
 
 
 // =================================================================
-// NETWORK STATISTICS
+// NETWORK STATS
 // =================================================================
 
 function getNetworkStats(
@@ -2293,7 +2815,9 @@ function getNetworkStats(
 ) {
 
     let maxRam = 0;
+
     let usedRam = 0;
+
     let freeRam = 0;
 
 
@@ -2329,14 +2853,15 @@ function getNetworkStats(
                 ? (
                     usedRam /
                     maxRam
-                ) * 100
+                ) *
+                  100
                 : 0
     };
 }
 
 
 // =================================================================
-// DISTRIBUTE WORKER FILES
+// DISTRIBUTE WORKERS
 // =================================================================
 
 async function distributeWorkers(
@@ -2365,7 +2890,9 @@ async function distributeWorkers(
 
 
         if (
-            !ns.hasRootAccess(server)
+            !ns.hasRootAccess(
+                server
+            )
         ) {
 
             continue;
@@ -2392,7 +2919,7 @@ async function distributeWorkers(
 
 
 // =================================================================
-// WAIT UNTIL THIS DISPATCHER'S WORKERS FINISH
+// WAIT FOR DISPATCHER WORKERS
 // =================================================================
 
 async function waitForWorkers(
@@ -2401,7 +2928,7 @@ async function waitForWorkers(
     WORKER
 ) {
 
-    const names =
+    const workerNames =
         new Set(
             Object.values(
                 WORKER
@@ -2421,7 +2948,9 @@ async function waitForWorkers(
         ) {
 
             if (
-                !ns.hasRootAccess(server)
+                !ns.hasRootAccess(
+                    server
+                )
             ) {
 
                 continue;
@@ -2434,13 +2963,17 @@ async function waitForWorkers(
                 );
 
 
-            if (
+            const found =
                 processes.some(
                     process =>
-                        names.has(
+                        workerNames.has(
                             process.filename
                         )
-                )
+                );
+
+
+            if (
+                found
             ) {
 
                 running =
@@ -2467,7 +3000,7 @@ async function waitForWorkers(
 
 
 // =================================================================
-// AVAILABLE THREAD COUNT
+// AVAILABLE THREADS
 // =================================================================
 
 function totalAvailableThreads(
@@ -2496,21 +3029,28 @@ function totalAvailableThreads(
 
 
 // =================================================================
-// SCAN NETWORK
+// NETWORK SCAN
 // =================================================================
 
-function scanNetwork(ns) {
+function scanNetwork(
+    ns
+) {
 
     const visited =
         new Set();
 
+
     const servers = [];
 
 
-    function scan(server) {
+    function scan(
+        server
+    ) {
 
         if (
-            visited.has(server)
+            visited.has(
+                server
+            )
         ) {
 
             return;
@@ -2521,6 +3061,7 @@ function scanNetwork(ns) {
             server
         );
 
+
         servers.push(
             server
         );
@@ -2528,7 +3069,9 @@ function scanNetwork(ns) {
 
         for (
             const neighbor
-            of ns.scan(server)
+            of ns.scan(
+                server
+            )
         ) {
 
             scan(
@@ -2548,7 +3091,7 @@ function scanNetwork(ns) {
 
 
 // =================================================================
-// CLONE HOST ALLOCATION STATE
+// CLONE HOST STATE
 // =================================================================
 
 function cloneHosts(
@@ -2601,7 +3144,7 @@ function renderDashboard(
                 CONFIG.separatorWidth
             ),
             COLOR.bold +
-                COLOR.brightWhite
+            COLOR.brightWhite
         )
     );
 
@@ -2633,7 +3176,7 @@ function renderDashboard(
         field(
             "Cycle",
             state.cycleNumber,
-            22
+            20
         ) +
 
         field(
@@ -2647,7 +3190,8 @@ function renderDashboard(
             (
                 CONFIG.targetHackFraction *
                 100
-            ).toFixed(1) + "%",
+            ).toFixed(1) +
+            "%",
             24
         ) +
 
@@ -2684,7 +3228,7 @@ function renderDashboard(
 
 
     // ============================================================
-    // NETWORK
+    // WORKER NETWORK
     // ============================================================
 
     section(
@@ -2732,26 +3276,21 @@ function renderDashboard(
     lines.push(
 
         field(
-            "Hack Worker",
-            ns.format.ram(
-                RAM.hack
-            ),
+            "Rooted This Cycle",
+            state.newlyRooted ?? 0,
             28
         ) +
 
         field(
-            "Grow Worker",
-            ns.format.ram(
-                RAM.grow
-            ),
+            "Rooted Since Start",
+            state.totalRooted ?? 0,
             28
         ) +
 
         field(
-            "Weaken Worker",
-            ns.format.ram(
-                RAM.weaken
-            ),
+            "Utilization",
+            state.networkStats.utilization.toFixed(1) +
+            "%",
             28
         )
     );
@@ -2805,16 +3344,73 @@ function renderDashboard(
                 (
                     target.moneyPercent *
                     100
-                ).toFixed(1) + "%",
+                ).toFixed(1) +
+                "%",
                 24
             ) +
 
             field(
                 "Security +",
-                target.securityDelta.toFixed(2),
+                target.securityDelta.toFixed(
+                    2
+                ),
                 24
             )
         );
+
+
+        // ========================================================
+        // TARGET EFFICIENCY
+        // ========================================================
+
+        if (
+            state.targetAnalysis
+        ) {
+
+            const a =
+                state.targetAnalysis;
+
+
+            lines.push(
+
+                field(
+                    "Hack Chance",
+                    (
+                        a.hackChance *
+                        100
+                    ).toFixed(1) +
+                    "%",
+                    24
+                ) +
+
+                field(
+                    "Expected $",
+                    ns.format.number(
+                        a.expectedMoney,
+                        2
+                    ),
+                    28
+                ) +
+
+                field(
+                    "$ / sec",
+                    ns.format.number(
+                        a.expectedMoneyPerSecond,
+                        2
+                    ),
+                    28
+                ) +
+
+                field(
+                    "$ / GB-sec",
+                    ns.format.number(
+                        a.score,
+                        2
+                    ),
+                    28
+                )
+            );
+        }
     }
 
 
@@ -2905,7 +3501,8 @@ function renderDashboard(
                 (
                     b.actualHackFraction *
                     100
-                ).toFixed(2) + "%",
+                ).toFixed(2) +
+                "%",
                 24
             )
         );
@@ -2913,7 +3510,7 @@ function renderDashboard(
 
 
     // ============================================================
-    // HOSTS
+    // TOP WORKER HOSTS
     // ============================================================
 
     section(
@@ -2976,7 +3573,8 @@ function renderDashboard(
                 ? (
                     host.usedRam /
                     host.maxRam
-                ) * 100
+                ) *
+                  100
                 : 0;
 
 
@@ -3030,14 +3628,16 @@ function renderDashboard(
         color(
             `Gap ${CONFIG.gapMs}ms  |  ` +
             `Home reserve ${ns.format.ram(CONFIG.homeReserveRam)}  |  ` +
-            `Maximum ${CONFIG.maxParallelBatches} parallel batches`,
+            `Maximum ${CONFIG.maxParallelBatches} batches`,
             COLOR.gray
         )
     );
 
 
     const display =
-        lines.join("\n");
+        lines.join(
+            "\n"
+        );
 
 
     if (
@@ -3085,7 +3685,7 @@ function section(
         color(
             `[ ${title} ]`,
             COLOR.bold +
-                COLOR.brightCyan
+            COLOR.brightCyan
         )
     );
 
@@ -3109,7 +3709,9 @@ function field(
 
     return (
         `${label}: ${value}`
-            .padEnd(width)
+            .padEnd(
+                width
+            )
     );
 }
 
@@ -3128,7 +3730,9 @@ function formatTime(
     ) {
 
         return (
-            seconds.toFixed(1) +
+            seconds.toFixed(
+                1
+            ) +
             "s"
         );
     }
@@ -3138,7 +3742,9 @@ function formatTime(
         (
             seconds /
             60
-        ).toFixed(1) +
+        ).toFixed(
+            1
+        ) +
         "m"
     );
 }
